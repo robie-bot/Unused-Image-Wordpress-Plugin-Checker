@@ -1,0 +1,144 @@
+.uif-wrap {
+    max-width: 1200px;
+}
+
+.uif-intro {
+    background: #fff;
+    padding: 24px;
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+    margin: 20px 0;
+}
+
+.uif-intro p {
+    font-size: 14px;
+    margin: 0 0 16px;
+}
+
+.uif-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 16px 0;
+}
+
+.uif-progress .spinner {
+    float: none;
+    margin: 0;
+}
+
+/* Stats cards */
+.uif-stats {
+    display: flex;
+    gap: 16px;
+    margin: 20px 0;
+    flex-wrap: wrap;
+}
+
+.uif-stat-card {
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+    padding: 20px 24px;
+    min-width: 160px;
+    text-align: center;
+    flex: 1;
+}
+
+.uif-stat-warning {
+    border-left: 4px solid #dba617;
+}
+
+.uif-stat-number {
+    display: block;
+    font-size: 32px;
+    font-weight: 600;
+    color: #1d2327;
+    line-height: 1.2;
+}
+
+.uif-stat-warning .uif-stat-number {
+    color: #996800;
+}
+
+.uif-stat-label {
+    display: block;
+    font-size: 13px;
+    color: #646970;
+    margin-top: 4px;
+}
+
+/* Table */
+.uif-table-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+    padding: 12px 16px;
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+}
+
+#uif-selected-count {
+    color: #646970;
+    font-size: 13px;
+}
+
+.uif-col-cb {
+    width: 40px;
+}
+
+.uif-col-thumb {
+    width: 80px;
+}
+
+.uif-col-size {
+    width: 100px;
+}
+
+.uif-col-date {
+    width: 110px;
+}
+
+.uif-col-actions {
+    width: 120px;
+}
+
+#uif-table .uif-thumb {
+    width: 60px;
+    height: 60px;
+    object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid #dcdcde;
+}
+
+#uif-table .uif-filename {
+    display: block;
+    color: #646970;
+    font-size: 12px;
+    margin-top: 2px;
+}
+
+#uif-table .row-actions a {
+    cursor: pointer;
+}
+
+#uif-table .row-actions .delete a {
+    color: #b32d2e;
+}
+
+.uif-success {
+    color: #00a32a;
+    font-size: 14px;
+    padding: 16px;
+    background: #f0f6fc;
+    border: 1px solid #c3c4c7;
+    border-left: 4px solid #00a32a;
+    border-radius: 4px;
+}
+
+.uif-row-deleting {
+    opacity: 0.5;
+    pointer-events: none;
+}
