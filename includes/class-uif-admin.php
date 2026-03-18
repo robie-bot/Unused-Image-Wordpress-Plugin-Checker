@@ -12,6 +12,7 @@ class UIF_Admin {
         add_action( 'wp_ajax_uif_scan_init', array( __CLASS__, 'ajax_scan_init' ) );
         add_action( 'wp_ajax_uif_scan_batch', array( __CLASS__, 'ajax_scan_batch' ) );
         add_action( 'wp_ajax_uif_delete', array( __CLASS__, 'ajax_delete' ) );
+        add_action( 'admin_init', array( __CLASS__, 'handle_csv_export' ) );
     }
 
     public static function add_menu() {
@@ -49,6 +50,7 @@ class UIF_Admin {
             'nonce'      => wp_create_nonce( 'uif_nonce' ),
             'batch_size' => 25,
             'per_page'   => 50,
+            'csv_url'    => wp_nonce_url( admin_url( 'admin.php?page=unused-image-finder&uif_export_csv=1' ), 'uif_csv_export' ),
             'i18n'       => array(
                 'scanning'      => __( 'Scanning media library...', 'unused-image-finder' ),
                 'scanning_pct'  => __( 'Processing images: %d%%', 'unused-image-finder' ),
@@ -252,6 +254,121 @@ class UIF_Admin {
             'has_more'   => ( $offset + $batch_size ) < count( $unused_ids ),
             'total'      => count( $unused_ids ),
         ) );
+    }
+
+    /**
+     * Server-side streaming CSV export.
+     * Uses the transient from scan_init, fetches metadata via direct SQL in one query.
+     */
+    public static function handle_csv_export() {
+        if ( empty( $_GET['uif_export_csv'] ) ) {
+            return;
+        }
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( 'Unauthorized' );
+        }
+
+        check_admin_referer( 'uif_csv_export' );
+
+        @set_time_limit( 600 );
+        wp_raise_memory_limit( 'admin' );
+
+        $unused_ids = get_transient( 'uif_unused_ids_' . get_current_user_id() );
+
+        if ( false === $unused_ids || empty( $unused_ids ) ) {
+            wp_die( 'No scan data found. Please run a scan first, then export.' );
+        }
+
+        global $wpdb;
+
+        // Get all attachment data in one SQL query.
+        $placeholders = implode( ',', array_fill( 0, count( $unused_ids ), '%d' ) );
+        $query = $wpdb->prepare(
+            "SELECT p.ID, p.post_title, p.post_date,
+                    pm.meta_value AS attached_file
+             FROM {$wpdb->posts} p
+             LEFT JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id AND pm.meta_key = '_wp_attached_file'
+             WHERE p.ID IN ($placeholders)
+             ORDER BY p.post_date DESC",
+            $unused_ids
+        );
+
+        $rows = $wpdb->get_results( $query );
+
+        $upload_dir = wp_upload_dir();
+        $base_path  = $upload_dir['basedir'];
+        $base_url   = $upload_dir['baseurl'];
+
+        // Stream CSV headers.
+        $filename = 'unused-images-' . gmdate( 'Y-m-d-His' ) . '.csv';
+
+        header( 'Content-Type: text/csv; charset=utf-8' );
+        header( 'Content-Disposition: attachment; filename="' . $filename . '"' );
+        header( 'Pragma: no-cache' );
+        header( 'Expires: 0' );
+
+        $output = fopen( 'php://output', 'w' );
+
+        // UTF-8 BOM for Excel.
+        fwrite( $output, "\xEF\xBB\xBF" );
+
+        // Header row.
+        fputcsv( $output, array( 'ID', 'Title', 'Filename', 'URL', 'File Size (bytes)', 'File Size (readable)', 'Upload Date' ) );
+
+        $total_size   = 0;
+        $total_count  = 0;
+        $chunk_count  = 0;
+
+        foreach ( $rows as $row ) {
+            $file_rel  = $row->attached_file;
+            $file_path = $file_rel ? $base_path . '/' . $file_rel : '';
+            $file_url  = $file_rel ? $base_url . '/' . $file_rel : '';
+            $filename_only = $file_rel ? basename( $file_rel ) : '';
+
+            $filesize = 0;
+            if ( $file_path && file_exists( $file_path ) ) {
+                $filesize = filesize( $file_path );
+            }
+
+            $readable_size = self::format_bytes( $filesize );
+
+            fputcsv( $output, array(
+                $row->ID,
+                $row->post_title,
+                $filename_only,
+                $file_url,
+                $filesize,
+                $readable_size,
+                $row->post_date,
+            ) );
+
+            $total_size += $filesize;
+            $total_count++;
+            $chunk_count++;
+
+            // Flush every 100 rows to keep memory low.
+            if ( $chunk_count >= 100 ) {
+                $chunk_count = 0;
+                flush();
+            }
+        }
+
+        // Summary rows.
+        fputcsv( $output, array() );
+        fputcsv( $output, array( 'Summary' ) );
+        fputcsv( $output, array( 'Unused Images', $total_count ) );
+        fputcsv( $output, array( 'Total Recoverable Space', self::format_bytes( $total_size ) ) );
+
+        fclose( $output );
+        exit;
+    }
+
+    private static function format_bytes( $bytes ) {
+        if ( $bytes === 0 ) return '0 B';
+        $units = array( 'B', 'KB', 'MB', 'GB' );
+        $i = floor( log( $bytes ) / log( 1024 ) );
+        return round( $bytes / pow( 1024, $i ), 1 ) . ' ' . $units[ $i ];
     }
 
     public static function ajax_delete() {
