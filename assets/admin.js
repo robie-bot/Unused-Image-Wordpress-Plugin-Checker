@@ -88,6 +88,7 @@
             }
 
             var data = res.data;
+            lastScanData = data;
 
             $('#uif-total').text(data.total_images);
             $('#uif-used').text(data.used_count);
@@ -183,9 +184,72 @@
         });
     });
 
-    // Export CSV.
+    // Export CSV (client-side from already-loaded scan data).
+    var lastScanData = null;
+
     $('#uif-export-csv-btn').on('click', function () {
-        window.location.href = uif.csv_url;
+        if (!lastScanData || !lastScanData.unused_images || lastScanData.unused_images.length === 0) {
+            showNotice('No scan data available. Please run a scan first.', 'warning');
+            return;
+        }
+
+        var rows = [];
+        // Header.
+        rows.push(['ID', 'Title', 'Filename', 'URL', 'File Size (bytes)', 'File Size (readable)', 'Upload Date', 'Edit Link']);
+
+        // Data rows.
+        $.each(lastScanData.unused_images, function (i, img) {
+            rows.push([
+                img.id,
+                img.title,
+                img.filename,
+                img.url,
+                img.filesize,
+                formatSize(img.filesize),
+                img.date,
+                img.edit_link || ''
+            ]);
+        });
+
+        // Summary.
+        rows.push([]);
+        rows.push(['Summary']);
+        rows.push(['Total Images in Library', lastScanData.total_images]);
+        rows.push(['Used Images', lastScanData.used_count]);
+        rows.push(['Unused Images', lastScanData.unused_count]);
+        rows.push(['Total Recoverable Space', formatSize(lastScanData.total_size)]);
+
+        // Build CSV string.
+        var csvContent = '\uFEFF'; // UTF-8 BOM for Excel.
+        $.each(rows, function (i, row) {
+            var line = $.map(row, function (cell) {
+                var str = String(cell == null ? '' : cell);
+                if (str.indexOf(',') !== -1 || str.indexOf('"') !== -1 || str.indexOf('\n') !== -1) {
+                    str = '"' + str.replace(/"/g, '""') + '"';
+                }
+                return str;
+            });
+            csvContent += line.join(',') + '\r\n';
+        });
+
+        // Trigger download.
+        var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        var url  = URL.createObjectURL(blob);
+        var link = document.createElement('a');
+        var now  = new Date();
+        var ts   = now.getFullYear() + '-' +
+                   String(now.getMonth() + 1).padStart(2, '0') + '-' +
+                   String(now.getDate()).padStart(2, '0') + '-' +
+                   String(now.getHours()).padStart(2, '0') +
+                   String(now.getMinutes()).padStart(2, '0') +
+                   String(now.getSeconds()).padStart(2, '0');
+
+        link.setAttribute('href', url);
+        link.setAttribute('download', 'unused-images-' + ts + '.csv');
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
     });
 
     // Single delete.
