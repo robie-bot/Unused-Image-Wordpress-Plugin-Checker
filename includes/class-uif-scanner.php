@@ -38,6 +38,7 @@ class UIF_Scanner {
         $used = array_merge( $used, self::get_wpbakery_image_ids() );
         $used = array_merge( $used, self::get_impreza_image_ids() );
         $used = array_merge( $used, self::get_site_icon_ids() );
+        $used = array_merge( $used, self::get_css_background_image_ids() );
 
         $used = apply_filters( 'uif_used_image_ids', $used );
 
@@ -631,6 +632,99 @@ class UIF_Scanner {
         if ( $site_icon ) {
             $ids[] = $site_icon;
         }
+        return $ids;
+    }
+
+    /**
+     * Scan ALL content for CSS background:url() and background-image:url().
+     * Covers inline styles, custom CSS, Customizer CSS, and theme options.
+     */
+    private static function get_css_background_image_ids() {
+        global $wpdb;
+        $ids = array();
+
+        $upload_dir = wp_get_upload_dir();
+        $base_url   = preg_quote( $upload_dir['baseurl'], '/' );
+
+        // Regex matches both background:url() and background-image:url()
+        // including shorthand like background: #fff url(...) no-repeat;
+        $bg_regex = '/background(?:-image)?\s*:[^;}]*url\(\s*["\']?(' . $base_url . '\/[^\s"\'<>)]+)["\']?\s*\)/i';
+
+        // 1. All post content (catches inline styles in any builder/editor).
+        $contents = $wpdb->get_col(
+            "SELECT post_content FROM {$wpdb->posts}
+             WHERE post_status IN ('publish','draft','pending','private','future')
+             AND post_content LIKE '%background%'
+             AND post_content LIKE '%url(%'"
+        );
+
+        foreach ( $contents as $content ) {
+            if ( preg_match_all( $bg_regex, $content, $m ) ) {
+                foreach ( $m[1] as $url ) {
+                    $found = self::url_to_attachment_id( $url );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+        }
+
+        // 2. WordPress Customizer Additional CSS (stored as custom_css post type).
+        $custom_css_posts = $wpdb->get_col(
+            "SELECT post_content FROM {$wpdb->posts}
+             WHERE post_type = 'custom_css'
+             AND post_content != ''"
+        );
+
+        foreach ( $custom_css_posts as $css ) {
+            if ( preg_match_all( $bg_regex, $css, $m ) ) {
+                foreach ( $m[1] as $url ) {
+                    $found = self::url_to_attachment_id( $url );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+        }
+
+        // 3. All postmeta that contains background url() (covers builder custom CSS fields).
+        $meta_css = $wpdb->get_col(
+            "SELECT meta_value FROM {$wpdb->postmeta}
+             WHERE meta_value LIKE '%background%'
+             AND meta_value LIKE '%url(%'
+             AND meta_value LIKE '%" . $wpdb->esc_like( $upload_dir['baseurl'] ) . "%'"
+        );
+
+        foreach ( $meta_css as $css ) {
+            if ( preg_match_all( $bg_regex, $css, $m ) ) {
+                foreach ( $m[1] as $url ) {
+                    $found = self::url_to_attachment_id( $url );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+        }
+
+        // 4. wp_options that contain background url() (theme custom CSS options).
+        $option_css = $wpdb->get_col(
+            "SELECT option_value FROM {$wpdb->options}
+             WHERE option_value LIKE '%background%'
+             AND option_value LIKE '%url(%'
+             AND option_value LIKE '%" . $wpdb->esc_like( $upload_dir['baseurl'] ) . "%'"
+        );
+
+        foreach ( $option_css as $css ) {
+            if ( preg_match_all( $bg_regex, $css, $m ) ) {
+                foreach ( $m[1] as $url ) {
+                    $found = self::url_to_attachment_id( $url );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+        }
+
         return $ids;
     }
 
