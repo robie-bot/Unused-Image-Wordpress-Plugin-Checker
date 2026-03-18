@@ -12,9 +12,8 @@
     var emptyMsg     = $('#uif-empty');
     var deleteBtn    = $('#uif-delete-btn');
     var notice       = $('#uif-notice');
-    var selectAll    = $('#uif-select-all, #uif-select-all-top');
 
-    // Accumulated scan data for CSV export.
+    // ── State ──────────────────────────────────────────────────
     var scanData = {
         total_images:  0,
         used_count:    0,
@@ -22,6 +21,13 @@
         unused_images: [],
         total_size:    0
     };
+
+    var currentPage   = 1;
+    var perPage        = uif.per_page || 50;
+    var selectedIds    = {};          // { id: true } across ALL pages
+    var allPagesSelected = false;     // "Select All Pages" flag
+
+    // ── Helpers ────────────────────────────────────────────────
 
     function formatSize(bytes) {
         if (bytes === 0) return '0 B';
@@ -37,21 +43,146 @@
             .empty()
             .append($('<p>').text(message))
             .show();
-
-        setTimeout(function () {
-            notice.fadeOut();
-        }, 5000);
-    }
-
-    function updateSelectedCount() {
-        var count = tbody.find('.uif-cb:checked').length;
-        $('#uif-selected-count').text(count > 0 ? count + ' selected' : '');
-        deleteBtn.prop('disabled', count === 0);
+        setTimeout(function () { notice.fadeOut(); }, 5000);
     }
 
     function escAttr(str) {
         return $('<span>').text(str).html().replace(/"/g, '&quot;');
     }
+
+    function totalSelectedCount() {
+        if (allPagesSelected) return scanData.unused_images.length;
+        var count = 0;
+        for (var k in selectedIds) {
+            if (selectedIds.hasOwnProperty(k) && selectedIds[k]) count++;
+        }
+        return count;
+    }
+
+    function updateSelectedUI() {
+        var count = totalSelectedCount();
+        $('#uif-selected-count').text(count > 0 ? count + ' selected' : '');
+        deleteBtn.prop('disabled', count === 0);
+
+        // Sync page checkboxes with selectedIds.
+        tbody.find('.uif-cb').each(function () {
+            var id = String($(this).val());
+            $(this).prop('checked', !!selectedIds[id] || allPagesSelected);
+        });
+
+        // Update "Select All (this page)" checkbox.
+        var pageImages = getPageImages();
+        var allPageChecked = pageImages.length > 0;
+        for (var i = 0; i < pageImages.length; i++) {
+            if (!selectedIds[String(pageImages[i].id)] && !allPagesSelected) {
+                allPageChecked = false;
+                break;
+            }
+        }
+        $('#uif-select-all, #uif-select-all-top').prop('checked', allPageChecked);
+        $('#uif-select-all-pages').prop('checked', allPagesSelected);
+    }
+
+    // ── Pagination ─────────────────────────────────────────────
+
+    function totalPages() {
+        return Math.max(1, Math.ceil(scanData.unused_images.length / perPage));
+    }
+
+    function getPageImages() {
+        var start = (currentPage - 1) * perPage;
+        return scanData.unused_images.slice(start, start + perPage);
+    }
+
+    function renderPage() {
+        tbody.empty();
+        var images = getPageImages();
+        var html = '';
+        for (var i = 0; i < images.length; i++) {
+            html += buildRow(images[i]);
+        }
+        tbody.html(html);
+        renderPagination();
+        updateSelectedUI();
+
+        // Scroll to top of table.
+        if (tableWrap.length) {
+            $('html, body').animate({ scrollTop: tableWrap.offset().top - 50 }, 200);
+        }
+    }
+
+    function renderPagination() {
+        var total = totalPages();
+        var showing = getPageImages().length;
+        var totalImgs = scanData.unused_images.length;
+        var start = (currentPage - 1) * perPage + 1;
+        var end   = Math.min(currentPage * perPage, totalImgs);
+
+        if (total <= 1) {
+            $('#uif-pagination-top, #uif-pagination-bottom').empty();
+            return;
+        }
+
+        var html = '<div class="tablenav"><div class="tablenav-pages">';
+        html += '<span class="displaying-num">' + totalImgs + ' items</span>';
+        html += '<span class="pagination-links">';
+
+        // First.
+        if (currentPage > 1) {
+            html += '<a class="first-page button uif-page-btn" data-page="1" title="First page">&laquo;</a> ';
+            html += '<a class="prev-page button uif-page-btn" data-page="' + (currentPage - 1) + '" title="Previous page">&lsaquo;</a> ';
+        } else {
+            html += '<span class="tablenav-pages-navspan button disabled">&laquo;</span> ';
+            html += '<span class="tablenav-pages-navspan button disabled">&lsaquo;</span> ';
+        }
+
+        // Current / Total.
+        html += '<span class="paging-input">';
+        html += '<input class="current-page" id="uif-current-page" type="text" size="2" value="' + currentPage + '" />';
+        html += ' of <span class="total-pages">' + total + '</span>';
+        html += '</span> ';
+
+        // Next / Last.
+        if (currentPage < total) {
+            html += '<a class="next-page button uif-page-btn" data-page="' + (currentPage + 1) + '" title="Next page">&rsaquo;</a> ';
+            html += '<a class="last-page button uif-page-btn" data-page="' + total + '" title="Last page">&raquo;</a>';
+        } else {
+            html += '<span class="tablenav-pages-navspan button disabled">&rsaquo;</span> ';
+            html += '<span class="tablenav-pages-navspan button disabled">&raquo;</span>';
+        }
+
+        html += '</span>';
+        html += '<span class="uif-page-range">Showing ' + start + '–' + end + ' of ' + totalImgs + '</span>';
+        html += '</div></div>';
+
+        $('#uif-pagination-top').html(html);
+        $('#uif-pagination-bottom').html(html);
+    }
+
+    // Page navigation events.
+    $(document).on('click', '.uif-page-btn', function (e) {
+        e.preventDefault();
+        var page = parseInt($(this).data('page'), 10);
+        if (page >= 1 && page <= totalPages()) {
+            currentPage = page;
+            renderPage();
+        }
+    });
+
+    $(document).on('keypress', '#uif-current-page', function (e) {
+        if (e.which === 13) {
+            e.preventDefault();
+            var page = parseInt($(this).val(), 10);
+            if (page >= 1 && page <= totalPages()) {
+                currentPage = page;
+                renderPage();
+            } else {
+                $(this).val(currentPage);
+            }
+        }
+    });
+
+    // ── Row builder ────────────────────────────────────────────
 
     function buildRow(img) {
         var safeUrl      = escAttr(img.url);
@@ -79,6 +210,8 @@
             '</tr>';
     }
 
+    // ── Progress ───────────────────────────────────────────────
+
     function setProgress(pct, text, detail) {
         progressBar.css('width', pct + '%');
         if (text) progressTxt.text(text);
@@ -97,8 +230,10 @@
         results.hide();
         notice.hide();
         tbody.empty();
+        currentPage = 1;
+        selectedIds = {};
+        allPagesSelected = false;
 
-        // Reset accumulated data.
         scanData = {
             total_images: 0, used_count: 0,
             unused_count: 0, unused_images: [], total_size: 0
@@ -106,7 +241,6 @@
 
         setProgress(0, uif.i18n.scanning, 'Identifying used images across your site...');
 
-        // Step 1: Init — identify unused IDs (heavy part).
         $.post(uif.ajax_url, {
             action: 'uif_scan_init',
             nonce:  uif.nonce
@@ -128,8 +262,6 @@
             }
 
             setProgress(10, 'Scan complete. Loading image details...', '0 of ' + res.data.unused_count + ' images loaded');
-
-            // Step 2: Fetch metadata in batches.
             fetchBatch(0, res.data.unused_count);
         })
         .fail(function () {
@@ -152,21 +284,12 @@
                 return;
             }
 
-            // Accumulate images.
             var images = res.data.images;
             for (var i = 0; i < images.length; i++) {
                 scanData.unused_images.push(images[i]);
                 scanData.total_size += images[i].filesize;
             }
 
-            // Append rows to table immediately (streaming feel).
-            var html = '';
-            for (var j = 0; j < images.length; j++) {
-                html += buildRow(images[j]);
-            }
-            tbody.append(html);
-
-            // Update progress.
             var loaded = scanData.unused_images.length;
             var pct    = 10 + Math.round((loaded / total) * 90);
             var detail = loaded + ' of ' + total + ' images loaded (' + formatSize(scanData.total_size) + ' recoverable)';
@@ -180,7 +303,6 @@
             $('#uif-size').text(formatSize(scanData.total_size));
 
             if (res.data.has_more) {
-                // Next batch.
                 fetchBatch(offset + uif.batch_size, total);
             } else {
                 finishScan();
@@ -193,7 +315,6 @@
     }
 
     function finishScan() {
-        // Final stat update.
         $('#uif-total').text(scanData.total_images);
         $('#uif-used').text(scanData.used_count);
         $('#uif-unused').text(scanData.unused_count);
@@ -202,6 +323,8 @@
         if (scanData.unused_count > 0) {
             tableWrap.show();
             emptyMsg.hide();
+            currentPage = 1;
+            renderPage();
         } else {
             tableWrap.hide();
             emptyMsg.show();
@@ -210,10 +333,7 @@
         results.show();
         setProgress(100, 'Done!', scanData.unused_count + ' unused images found — ' + formatSize(scanData.total_size) + ' recoverable');
 
-        setTimeout(function () {
-            progress.slideUp(300);
-        }, 1500);
-
+        setTimeout(function () { progress.slideUp(300); }, 1500);
         scanDone();
     }
 
@@ -225,71 +345,140 @@
 
     scanBtn.on('click', startScan);
 
-    // ── Select all ─────────────────────────────────────────────
+    // ── Select All (this page) ─────────────────────────────────
 
     $(document).on('change', '#uif-select-all, #uif-select-all-top', function () {
         var checked = $(this).prop('checked');
-        selectAll.prop('checked', checked);
-        tbody.find('.uif-cb').prop('checked', checked);
-        updateSelectedCount();
+        var pageImages = getPageImages();
+        for (var i = 0; i < pageImages.length; i++) {
+            var id = String(pageImages[i].id);
+            if (checked) {
+                selectedIds[id] = true;
+            } else {
+                delete selectedIds[id];
+                allPagesSelected = false;
+            }
+        }
+        updateSelectedUI();
     });
 
+    // ── Select All Pages ───────────────────────────────────────
+
+    $(document).on('change', '#uif-select-all-pages', function () {
+        var checked = $(this).prop('checked');
+        allPagesSelected = checked;
+        selectedIds = {};
+        if (checked) {
+            for (var i = 0; i < scanData.unused_images.length; i++) {
+                selectedIds[String(scanData.unused_images[i].id)] = true;
+            }
+        }
+        updateSelectedUI();
+    });
+
+    // ── Individual checkbox ────────────────────────────────────
+
     $(document).on('change', '.uif-cb', function () {
-        updateSelectedCount();
-        var total    = tbody.find('.uif-cb').length;
-        var selected = tbody.find('.uif-cb:checked').length;
-        selectAll.prop('checked', total === selected && total > 0);
+        var id = String($(this).val());
+        if ($(this).prop('checked')) {
+            selectedIds[id] = true;
+        } else {
+            delete selectedIds[id];
+            allPagesSelected = false;
+        }
+        updateSelectedUI();
     });
 
     // ── Bulk delete ────────────────────────────────────────────
 
     deleteBtn.on('click', function () {
         var ids = [];
-        tbody.find('.uif-cb:checked').each(function () {
-            ids.push($(this).val());
-        });
+        for (var k in selectedIds) {
+            if (selectedIds.hasOwnProperty(k) && selectedIds[k]) {
+                ids.push(k);
+            }
+        }
 
         if (ids.length === 0) {
             showNotice(uif.i18n.no_selection, 'warning');
             return;
         }
 
-        if (!confirm(uif.i18n.confirm)) {
+        if (!confirm(uif.i18n.confirm.replace('%d', ids.length) || uif.i18n.confirm)) {
             return;
         }
 
         deleteBtn.prop('disabled', true).text(uif.i18n.deleting);
 
-        $.post(uif.ajax_url, {
-            action: 'uif_delete',
-            nonce:  uif.nonce,
-            ids:    ids,
-        })
-        .done(function (res) {
-            if (res.success) {
-                $.each(ids, function (i, id) {
-                    tbody.find('tr[data-id="' + id + '"]').fadeOut(300, function () {
-                        $(this).remove();
-                        updateSelectedCount();
-                        var remaining = tbody.find('tr').length;
-                        $('#uif-unused').text(remaining);
-                        if (remaining === 0) {
-                            tableWrap.hide();
-                            emptyMsg.show();
-                        }
-                    });
+        // Delete in chunks of 50 to avoid server limits.
+        var chunkSize = 50;
+        var totalDeleted = 0;
+        var totalToDelete = ids.length;
+
+        function deleteChunk(startIdx) {
+            var chunk = ids.slice(startIdx, startIdx + chunkSize);
+            if (chunk.length === 0) {
+                // All done.
+                showNotice(totalDeleted + ' ' + uif.i18n.deleted, 'success');
+
+                // Remove deleted images from scanData.
+                var deletedSet = {};
+                for (var i = 0; i < ids.length; i++) { deletedSet[ids[i]] = true; }
+
+                scanData.unused_images = scanData.unused_images.filter(function (img) {
+                    return !deletedSet[String(img.id)];
                 });
-                showNotice(res.data.deleted + ' ' + uif.i18n.deleted, 'success');
-            } else {
-                showNotice(uif.i18n.error, 'error');
+                scanData.unused_count = scanData.unused_images.length;
+
+                // Recalculate total size.
+                scanData.total_size = 0;
+                for (var j = 0; j < scanData.unused_images.length; j++) {
+                    scanData.total_size += scanData.unused_images[j].filesize;
+                }
+
+                selectedIds = {};
+                allPagesSelected = false;
+
+                // Update stat cards.
+                $('#uif-unused').text(scanData.unused_count);
+                $('#uif-size').text(formatSize(scanData.total_size));
+
+                // Fix current page if needed.
+                if (currentPage > totalPages()) currentPage = totalPages();
+
+                if (scanData.unused_images.length === 0) {
+                    tableWrap.hide();
+                    emptyMsg.show();
+                } else {
+                    renderPage();
+                }
+
+                deleteBtn.prop('disabled', false).text('Delete Selected');
+                return;
             }
-        })
-        .fail(function () {
-            showNotice(uif.i18n.error, 'error');
-        })
-        .always(function () {
-            deleteBtn.prop('disabled', false).text('Delete Selected');
-        });
+
+            $.post(uif.ajax_url, {
+                action: 'uif_delete',
+                nonce:  uif.nonce,
+                ids:    chunk
+            })
+            .done(function (res) {
+                if (res.success) {
+                    totalDeleted += res.data.deleted;
+                    deleteBtn.text('Deleting... ' + totalDeleted + '/' + totalToDelete);
+                    deleteChunk(startIdx + chunkSize);
+                } else {
+                    showNotice(uif.i18n.error, 'error');
+                    deleteBtn.prop('disabled', false).text('Delete Selected');
+                }
+            })
+            .fail(function () {
+                showNotice(uif.i18n.error, 'error');
+                deleteBtn.prop('disabled', false).text('Delete Selected');
+            });
+        }
+
+        deleteChunk(0);
     });
 
     // ── Export CSV (client-side, instant) ───────────────────────
@@ -372,20 +561,32 @@
         $.post(uif.ajax_url, {
             action: 'uif_delete',
             nonce:  uif.nonce,
-            ids:    [id],
+            ids:    [id]
         })
         .done(function (res) {
             if (res.success) {
-                row.fadeOut(300, function () {
-                    $(this).remove();
-                    updateSelectedCount();
-                    var remaining = tbody.find('tr').length;
-                    $('#uif-unused').text(remaining);
-                    if (remaining === 0) {
-                        tableWrap.hide();
-                        emptyMsg.show();
-                    }
+                // Remove from scanData.
+                scanData.unused_images = scanData.unused_images.filter(function (img) {
+                    return img.id !== id;
                 });
+                scanData.unused_count = scanData.unused_images.length;
+                scanData.total_size = 0;
+                for (var i = 0; i < scanData.unused_images.length; i++) {
+                    scanData.total_size += scanData.unused_images[i].filesize;
+                }
+
+                delete selectedIds[String(id)];
+
+                $('#uif-unused').text(scanData.unused_count);
+                $('#uif-size').text(formatSize(scanData.total_size));
+
+                if (scanData.unused_images.length === 0) {
+                    tableWrap.hide();
+                    emptyMsg.show();
+                } else {
+                    if (currentPage > totalPages()) currentPage = totalPages();
+                    renderPage();
+                }
             } else {
                 row.removeClass('uif-row-deleting');
                 showNotice(uif.i18n.error, 'error');

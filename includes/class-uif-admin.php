@@ -48,6 +48,7 @@ class UIF_Admin {
             'ajax_url'   => admin_url( 'admin-ajax.php' ),
             'nonce'      => wp_create_nonce( 'uif_nonce' ),
             'batch_size' => 50,
+            'per_page'   => 50,
             'i18n'       => array(
                 'scanning'      => __( 'Scanning media library...', 'unused-image-finder' ),
                 'scanning_pct'  => __( 'Processing images: %d%%', 'unused-image-finder' ),
@@ -108,7 +109,11 @@ class UIF_Admin {
                     <div class="uif-table-actions">
                         <label>
                             <input type="checkbox" id="uif-select-all" />
-                            <?php esc_html_e( 'Select All', 'unused-image-finder' ); ?>
+                            <?php esc_html_e( 'Select All (this page)', 'unused-image-finder' ); ?>
+                        </label>
+                        <label>
+                            <input type="checkbox" id="uif-select-all-pages" />
+                            <?php esc_html_e( 'Select All Pages', 'unused-image-finder' ); ?>
                         </label>
                         <button id="uif-delete-btn" class="button button-secondary" disabled>
                             <?php esc_html_e( 'Delete Selected', 'unused-image-finder' ); ?>
@@ -118,6 +123,9 @@ class UIF_Admin {
                         </button>
                         <span id="uif-selected-count"></span>
                     </div>
+
+                    <!-- Pagination top -->
+                    <div class="uif-pagination" id="uif-pagination-top"></div>
 
                     <table class="wp-list-table widefat fixed striped" id="uif-table">
                         <thead>
@@ -132,6 +140,9 @@ class UIF_Admin {
                         </thead>
                         <tbody id="uif-tbody"></tbody>
                     </table>
+
+                    <!-- Pagination bottom -->
+                    <div class="uif-pagination" id="uif-pagination-bottom"></div>
                 </div>
 
                 <div id="uif-empty" style="display:none;">
