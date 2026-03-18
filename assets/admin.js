@@ -213,11 +213,11 @@
     // ── Progress ───────────────────────────────────────────────
 
     function setProgress(pct, text, detail) {
-        progressBar.css('width', pct + '%');
+        if (pct !== null && pct !== undefined) progressBar.css('width', pct + '%');
         if (text) progressTxt.text(text);
         if (detail) {
             progressDtl.text(detail).show();
-        } else {
+        } else if (detail === '') {
             progressDtl.hide();
         }
     }
@@ -270,7 +270,10 @@
         });
     }
 
-    function fetchBatch(offset, total) {
+    function fetchBatch(offset, total, retries) {
+        if (typeof retries === 'undefined') retries = 0;
+        var maxRetries = 3;
+
         $.post(uif.ajax_url, {
             action:     'uif_scan_batch',
             nonce:      uif.nonce,
@@ -279,8 +282,16 @@
         })
         .done(function (res) {
             if (!res.success) {
+                // Retry on server error.
+                if (retries < maxRetries) {
+                    setProgress(null, null, 'Batch failed, retrying... (' + (retries + 1) + '/' + maxRetries + ')');
+                    setTimeout(function () {
+                        fetchBatch(offset, total, retries + 1);
+                    }, 2000);
+                    return;
+                }
                 showNotice(res.data || uif.i18n.error, 'error');
-                scanDone();
+                finishScan();
                 return;
             }
 
@@ -303,13 +314,22 @@
             $('#uif-size').text(formatSize(scanData.total_size));
 
             if (res.data.has_more) {
-                fetchBatch(offset + uif.batch_size, total);
+                fetchBatch(offset + uif.batch_size, total, 0);
             } else {
                 finishScan();
             }
         })
-        .fail(function () {
-            showNotice(uif.i18n.error + ' Some images may not be listed.', 'warning');
+        .fail(function (jqXHR, textStatus) {
+            // Retry on network/timeout errors.
+            if (retries < maxRetries) {
+                var loaded = scanData.unused_images.length;
+                setProgress(null, null, 'Request failed (' + textStatus + '), retrying in 3s... (' + (retries + 1) + '/' + maxRetries + ') — ' + loaded + ' loaded so far');
+                setTimeout(function () {
+                    fetchBatch(offset, total, retries + 1);
+                }, 3000);
+                return;
+            }
+            showNotice('Failed to load all images after ' + maxRetries + ' retries. ' + scanData.unused_images.length + ' of ' + total + ' loaded.', 'warning');
             finishScan();
         });
     }

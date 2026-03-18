@@ -47,7 +47,7 @@ class UIF_Admin {
         wp_localize_script( 'uif-admin', 'uif', array(
             'ajax_url'   => admin_url( 'admin-ajax.php' ),
             'nonce'      => wp_create_nonce( 'uif_nonce' ),
-            'batch_size' => 50,
+            'batch_size' => 25,
             'per_page'   => 50,
             'i18n'       => array(
                 'scanning'      => __( 'Scanning media library...', 'unused-image-finder' ),
@@ -195,8 +195,12 @@ class UIF_Admin {
             wp_send_json_error( 'Unauthorized' );
         }
 
+        // Ensure each batch gets enough time.
+        @set_time_limit( 120 );
+        wp_raise_memory_limit( 'admin' );
+
         $offset     = isset( $_POST['offset'] ) ? absint( $_POST['offset'] ) : 0;
-        $batch_size = isset( $_POST['batch_size'] ) ? absint( $_POST['batch_size'] ) : 50;
+        $batch_size = isset( $_POST['batch_size'] ) ? absint( $_POST['batch_size'] ) : 25;
 
         // Cap batch size to prevent abuse.
         $batch_size = min( $batch_size, 100 );
