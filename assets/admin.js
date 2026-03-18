@@ -1,16 +1,27 @@
 (function ($) {
     'use strict';
 
-    var scanBtn     = $('#uif-scan-btn');
-    var progress    = $('#uif-progress');
-    var progressTxt = $('#uif-progress-text');
-    var results     = $('#uif-results');
-    var tableWrap   = $('#uif-table-wrap');
-    var tbody       = $('#uif-tbody');
-    var emptyMsg    = $('#uif-empty');
-    var deleteBtn   = $('#uif-delete-btn');
-    var notice      = $('#uif-notice');
-    var selectAll   = $('#uif-select-all, #uif-select-all-top');
+    var scanBtn      = $('#uif-scan-btn');
+    var progress     = $('#uif-progress');
+    var progressTxt  = $('#uif-progress-text');
+    var progressBar  = $('#uif-progress-bar');
+    var progressDtl  = $('#uif-progress-detail');
+    var results      = $('#uif-results');
+    var tableWrap    = $('#uif-table-wrap');
+    var tbody        = $('#uif-tbody');
+    var emptyMsg     = $('#uif-empty');
+    var deleteBtn    = $('#uif-delete-btn');
+    var notice       = $('#uif-notice');
+    var selectAll    = $('#uif-select-all, #uif-select-all-top');
+
+    // Accumulated scan data for CSV export.
+    var scanData = {
+        total_images:  0,
+        used_count:    0,
+        unused_count:  0,
+        unused_images: [],
+        total_size:    0
+    };
 
     function formatSize(bytes) {
         if (bytes === 0) return '0 B';
@@ -68,58 +79,154 @@
             '</tr>';
     }
 
-    // Scan.
-    scanBtn.on('click', function () {
+    function setProgress(pct, text, detail) {
+        progressBar.css('width', pct + '%');
+        if (text) progressTxt.text(text);
+        if (detail) {
+            progressDtl.text(detail).show();
+        } else {
+            progressDtl.hide();
+        }
+    }
+
+    // ── Batched scan ───────────────────────────────────────────
+
+    function startScan() {
         scanBtn.prop('disabled', true);
         progress.show();
         results.hide();
         notice.hide();
         tbody.empty();
-        progressTxt.text(uif.i18n.scanning);
 
+        // Reset accumulated data.
+        scanData = {
+            total_images: 0, used_count: 0,
+            unused_count: 0, unused_images: [], total_size: 0
+        };
+
+        setProgress(0, uif.i18n.scanning, 'Identifying used images across your site...');
+
+        // Step 1: Init — identify unused IDs (heavy part).
         $.post(uif.ajax_url, {
-            action: 'uif_scan',
-            nonce: uif.nonce,
+            action: 'uif_scan_init',
+            nonce:  uif.nonce
         })
         .done(function (res) {
             if (!res.success) {
-                showNotice(uif.i18n.error, 'error');
+                showNotice(res.data || uif.i18n.error, 'error');
+                scanDone();
                 return;
             }
 
-            var data = res.data;
-            lastScanData = data;
+            scanData.total_images = res.data.total_images;
+            scanData.used_count   = res.data.used_count;
+            scanData.unused_count = res.data.unused_count;
 
-            $('#uif-total').text(data.total_images);
-            $('#uif-used').text(data.used_count);
-            $('#uif-unused').text(data.unused_count);
-            $('#uif-size').text(formatSize(data.total_size));
-
-            if (data.unused_count > 0) {
-                var html = '';
-                $.each(data.unused_images, function (i, img) {
-                    html += buildRow(img);
-                });
-                tbody.html(html);
-                tableWrap.show();
-                emptyMsg.hide();
-            } else {
-                tableWrap.hide();
-                emptyMsg.show();
+            if (res.data.unused_count === 0) {
+                finishScan();
+                return;
             }
 
-            results.show();
+            setProgress(10, 'Scan complete. Loading image details...', '0 of ' + res.data.unused_count + ' images loaded');
+
+            // Step 2: Fetch metadata in batches.
+            fetchBatch(0, res.data.unused_count);
         })
         .fail(function () {
             showNotice(uif.i18n.error, 'error');
-        })
-        .always(function () {
-            progress.hide();
-            scanBtn.prop('disabled', false);
+            scanDone();
         });
-    });
+    }
 
-    // Select all.
+    function fetchBatch(offset, total) {
+        $.post(uif.ajax_url, {
+            action:     'uif_scan_batch',
+            nonce:      uif.nonce,
+            offset:     offset,
+            batch_size: uif.batch_size
+        })
+        .done(function (res) {
+            if (!res.success) {
+                showNotice(res.data || uif.i18n.error, 'error');
+                scanDone();
+                return;
+            }
+
+            // Accumulate images.
+            var images = res.data.images;
+            for (var i = 0; i < images.length; i++) {
+                scanData.unused_images.push(images[i]);
+                scanData.total_size += images[i].filesize;
+            }
+
+            // Append rows to table immediately (streaming feel).
+            var html = '';
+            for (var j = 0; j < images.length; j++) {
+                html += buildRow(images[j]);
+            }
+            tbody.append(html);
+
+            // Update progress.
+            var loaded = scanData.unused_images.length;
+            var pct    = 10 + Math.round((loaded / total) * 90);
+            var detail = loaded + ' of ' + total + ' images loaded (' + formatSize(scanData.total_size) + ' recoverable)';
+
+            setProgress(pct, uif.i18n.building.replace('%d', loaded).replace('%d', total), detail);
+
+            // Update stat cards live.
+            $('#uif-total').text(scanData.total_images);
+            $('#uif-used').text(scanData.used_count);
+            $('#uif-unused').text(loaded);
+            $('#uif-size').text(formatSize(scanData.total_size));
+
+            if (res.data.has_more) {
+                // Next batch.
+                fetchBatch(offset + uif.batch_size, total);
+            } else {
+                finishScan();
+            }
+        })
+        .fail(function () {
+            showNotice(uif.i18n.error + ' Some images may not be listed.', 'warning');
+            finishScan();
+        });
+    }
+
+    function finishScan() {
+        // Final stat update.
+        $('#uif-total').text(scanData.total_images);
+        $('#uif-used').text(scanData.used_count);
+        $('#uif-unused').text(scanData.unused_count);
+        $('#uif-size').text(formatSize(scanData.total_size));
+
+        if (scanData.unused_count > 0) {
+            tableWrap.show();
+            emptyMsg.hide();
+        } else {
+            tableWrap.hide();
+            emptyMsg.show();
+        }
+
+        results.show();
+        setProgress(100, 'Done!', scanData.unused_count + ' unused images found — ' + formatSize(scanData.total_size) + ' recoverable');
+
+        setTimeout(function () {
+            progress.slideUp(300);
+        }, 1500);
+
+        scanDone();
+    }
+
+    function scanDone() {
+        scanBtn.prop('disabled', false);
+    }
+
+    // ── Scan button ────────────────────────────────────────────
+
+    scanBtn.on('click', startScan);
+
+    // ── Select all ─────────────────────────────────────────────
+
     $(document).on('change', '#uif-select-all, #uif-select-all-top', function () {
         var checked = $(this).prop('checked');
         selectAll.prop('checked', checked);
@@ -129,12 +236,13 @@
 
     $(document).on('change', '.uif-cb', function () {
         updateSelectedCount();
-        var total = tbody.find('.uif-cb').length;
+        var total    = tbody.find('.uif-cb').length;
         var selected = tbody.find('.uif-cb:checked').length;
         selectAll.prop('checked', total === selected && total > 0);
     });
 
-    // Bulk delete.
+    // ── Bulk delete ────────────────────────────────────────────
+
     deleteBtn.on('click', function () {
         var ids = [];
         tbody.find('.uif-cb:checked').each(function () {
@@ -154,8 +262,8 @@
 
         $.post(uif.ajax_url, {
             action: 'uif_delete',
-            nonce: uif.nonce,
-            ids: ids,
+            nonce:  uif.nonce,
+            ids:    ids,
         })
         .done(function (res) {
             if (res.success) {
@@ -184,21 +292,18 @@
         });
     });
 
-    // Export CSV (client-side from already-loaded scan data).
-    var lastScanData = null;
+    // ── Export CSV (client-side, instant) ───────────────────────
 
     $('#uif-export-csv-btn').on('click', function () {
-        if (!lastScanData || !lastScanData.unused_images || lastScanData.unused_images.length === 0) {
+        if (!scanData.unused_images || scanData.unused_images.length === 0) {
             showNotice('No scan data available. Please run a scan first.', 'warning');
             return;
         }
 
         var rows = [];
-        // Header.
         rows.push(['ID', 'Title', 'Filename', 'URL', 'File Size (bytes)', 'File Size (readable)', 'Upload Date', 'Edit Link']);
 
-        // Data rows.
-        $.each(lastScanData.unused_images, function (i, img) {
+        $.each(scanData.unused_images, function (i, img) {
             rows.push([
                 img.id,
                 img.title,
@@ -211,16 +316,14 @@
             ]);
         });
 
-        // Summary.
         rows.push([]);
         rows.push(['Summary']);
-        rows.push(['Total Images in Library', lastScanData.total_images]);
-        rows.push(['Used Images', lastScanData.used_count]);
-        rows.push(['Unused Images', lastScanData.unused_count]);
-        rows.push(['Total Recoverable Space', formatSize(lastScanData.total_size)]);
+        rows.push(['Total Images in Library', scanData.total_images]);
+        rows.push(['Used Images', scanData.used_count]);
+        rows.push(['Unused Images', scanData.unused_count]);
+        rows.push(['Total Recoverable Space', formatSize(scanData.total_size)]);
 
-        // Build CSV string.
-        var csvContent = '\uFEFF'; // UTF-8 BOM for Excel.
+        var csvContent = '\uFEFF';
         $.each(rows, function (i, row) {
             var line = $.map(row, function (cell) {
                 var str = String(cell == null ? '' : cell);
@@ -232,7 +335,6 @@
             csvContent += line.join(',') + '\r\n';
         });
 
-        // Trigger download.
         var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         var url  = URL.createObjectURL(blob);
         var link = document.createElement('a');
@@ -250,9 +352,12 @@
         link.click();
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
+
+        showNotice('CSV exported: ' + scanData.unused_images.length + ' images.', 'success');
     });
 
-    // Single delete.
+    // ── Single delete ──────────────────────────────────────────
+
     $(document).on('click', '.uif-delete-single', function (e) {
         e.preventDefault();
         var id  = $(this).data('id');
@@ -266,8 +371,8 @@
 
         $.post(uif.ajax_url, {
             action: 'uif_delete',
-            nonce: uif.nonce,
-            ids: [id],
+            nonce:  uif.nonce,
+            ids:    [id],
         })
         .done(function (res) {
             if (res.success) {

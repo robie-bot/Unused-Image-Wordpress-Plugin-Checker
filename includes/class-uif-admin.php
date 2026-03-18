@@ -9,9 +9,9 @@ class UIF_Admin {
     public static function init() {
         add_action( 'admin_menu', array( __CLASS__, 'add_menu' ) );
         add_action( 'admin_enqueue_scripts', array( __CLASS__, 'enqueue_assets' ) );
-        add_action( 'wp_ajax_uif_scan', array( __CLASS__, 'ajax_scan' ) );
+        add_action( 'wp_ajax_uif_scan_init', array( __CLASS__, 'ajax_scan_init' ) );
+        add_action( 'wp_ajax_uif_scan_batch', array( __CLASS__, 'ajax_scan_batch' ) );
         add_action( 'wp_ajax_uif_delete', array( __CLASS__, 'ajax_delete' ) );
-        add_action( 'admin_post_uif_export_csv', array( __CLASS__, 'handle_csv_export' ) );
     }
 
     public static function add_menu() {
@@ -47,9 +47,11 @@ class UIF_Admin {
         wp_localize_script( 'uif-admin', 'uif', array(
             'ajax_url'   => admin_url( 'admin-ajax.php' ),
             'nonce'      => wp_create_nonce( 'uif_nonce' ),
-            'csv_url'    => wp_nonce_url( admin_url( 'admin-post.php?action=uif_export_csv' ), 'uif_csv_export' ),
-            'i18n'     => array(
-                'scanning'      => __( 'Scanning...', 'unused-image-finder' ),
+            'batch_size' => 50,
+            'i18n'       => array(
+                'scanning'      => __( 'Scanning media library...', 'unused-image-finder' ),
+                'scanning_pct'  => __( 'Processing images: %d%%', 'unused-image-finder' ),
+                'building'      => __( 'Building unused image list: %d of %d', 'unused-image-finder' ),
                 'confirm'       => __( 'Are you sure you want to permanently delete the selected images? This cannot be undone.', 'unused-image-finder' ),
                 'deleting'      => __( 'Deleting...', 'unused-image-finder' ),
                 'deleted'       => __( 'Deleted successfully.', 'unused-image-finder' ),
@@ -72,8 +74,14 @@ class UIF_Admin {
             </div>
 
             <div id="uif-progress" class="uif-progress" style="display:none;">
-                <div class="uif-spinner"><span class="spinner is-active"></span></div>
-                <span id="uif-progress-text"><?php esc_html_e( 'Scanning...', 'unused-image-finder' ); ?></span>
+                <div class="uif-progress-header">
+                    <span class="spinner is-active"></span>
+                    <span id="uif-progress-text"><?php esc_html_e( 'Scanning...', 'unused-image-finder' ); ?></span>
+                </div>
+                <div class="uif-progress-bar-wrap">
+                    <div class="uif-progress-bar" id="uif-progress-bar" style="width:0%"></div>
+                </div>
+                <span id="uif-progress-detail" class="uif-progress-detail"></span>
             </div>
 
             <div id="uif-results" style="display:none;">
@@ -136,79 +144,99 @@ class UIF_Admin {
         <?php
     }
 
-    public static function ajax_scan() {
+    /**
+     * Step 1: Identify all unused image IDs (heavy lifting).
+     * Stores IDs in a transient so batch requests can pull from it.
+     */
+    public static function ajax_scan_init() {
         check_ajax_referer( 'uif_nonce', 'nonce' );
 
         if ( ! current_user_can( 'manage_options' ) ) {
             wp_send_json_error( 'Unauthorized' );
         }
 
-        $results = UIF_Scanner::scan();
-        wp_send_json_success( $results );
+        // Increase limits for the detection phase.
+        @set_time_limit( 300 );
+        wp_raise_memory_limit( 'admin' );
+
+        $all_ids  = UIF_Scanner::get_all_image_ids();
+        $used_ids = UIF_Scanner::get_used_image_ids();
+        $unused   = array_values( array_diff( $all_ids, $used_ids ) );
+
+        // Store unused IDs in a transient (valid 1 hour).
+        set_transient( 'uif_unused_ids_' . get_current_user_id(), $unused, HOUR_IN_SECONDS );
+
+        wp_send_json_success( array(
+            'total_images' => count( $all_ids ),
+            'used_count'   => count( $used_ids ),
+            'unused_count' => count( $unused ),
+        ) );
     }
 
     /**
-     * Handle CSV export via admin GET request.
+     * Step 2: Fetch metadata for a batch of unused images.
+     * Called repeatedly with offset until all images are loaded.
      */
-    public static function handle_csv_export() {
-        if ( ! isset( $_GET['_wpnonce'] ) || ! wp_verify_nonce( $_GET['_wpnonce'], 'uif_csv_export' ) ) {
-            wp_die( 'Invalid nonce.' );
-        }
+    public static function ajax_scan_batch() {
+        check_ajax_referer( 'uif_nonce', 'nonce' );
 
         if ( ! current_user_can( 'manage_options' ) ) {
-            wp_die( 'Unauthorized' );
+            wp_send_json_error( 'Unauthorized' );
         }
 
-        $results = UIF_Scanner::scan();
+        $offset     = isset( $_POST['offset'] ) ? absint( $_POST['offset'] ) : 0;
+        $batch_size = isset( $_POST['batch_size'] ) ? absint( $_POST['batch_size'] ) : 50;
 
-        $filename = 'unused-images-' . date( 'Y-m-d-His' ) . '.csv';
+        // Cap batch size to prevent abuse.
+        $batch_size = min( $batch_size, 100 );
 
-        header( 'Content-Type: text/csv; charset=utf-8' );
-        header( 'Content-Disposition: attachment; filename=' . $filename );
-        header( 'Pragma: no-cache' );
-        header( 'Expires: 0' );
+        $unused_ids = get_transient( 'uif_unused_ids_' . get_current_user_id() );
 
-        $output = fopen( 'php://output', 'w' );
+        if ( false === $unused_ids ) {
+            wp_send_json_error( 'Scan expired. Please run the scan again.' );
+        }
 
-        // UTF-8 BOM for Excel compatibility.
-        fprintf( $output, chr(0xEF) . chr(0xBB) . chr(0xBF) );
+        $batch = array_slice( $unused_ids, $offset, $batch_size );
+        $images = array();
+        $batch_size_bytes = 0;
 
-        // Header row.
-        fputcsv( $output, array(
-            'ID',
-            'Title',
-            'Filename',
-            'URL',
-            'File Size (bytes)',
-            'File Size (readable)',
-            'Upload Date',
-            'Edit Link',
+        foreach ( $batch as $id ) {
+            $url       = wp_get_attachment_url( $id );
+            $metadata  = wp_get_attachment_metadata( $id );
+            $file_path = get_attached_file( $id );
+            $filesize  = file_exists( $file_path ) ? filesize( $file_path ) : 0;
+
+            // Also count thumbnail sizes on disk.
+            if ( ! empty( $metadata['sizes'] ) && $file_path ) {
+                $dir = dirname( $file_path );
+                foreach ( $metadata['sizes'] as $size ) {
+                    $thumb = $dir . '/' . $size['file'];
+                    if ( file_exists( $thumb ) ) {
+                        $filesize += filesize( $thumb );
+                    }
+                }
+            }
+
+            $img_data = array(
+                'id'        => (int) $id,
+                'url'       => $url,
+                'title'     => get_the_title( $id ),
+                'filename'  => basename( $file_path ),
+                'filesize'  => $filesize,
+                'date'      => get_the_date( 'Y-m-d', $id ),
+                'edit_link' => get_edit_post_link( $id, 'raw' ),
+            );
+
+            $images[] = $img_data;
+            $batch_size_bytes += $filesize;
+        }
+
+        wp_send_json_success( array(
+            'images'     => $images,
+            'batch_size' => $batch_size_bytes,
+            'has_more'   => ( $offset + $batch_size ) < count( $unused_ids ),
+            'total'      => count( $unused_ids ),
         ) );
-
-        // Data rows.
-        foreach ( $results['unused_images'] as $img ) {
-            fputcsv( $output, array(
-                $img['id'],
-                $img['title'],
-                $img['filename'],
-                $img['url'],
-                $img['filesize'],
-                size_format( $img['filesize'], 1 ),
-                $img['date'],
-                $img['edit_link'],
-            ) );
-        }
-
-        // Summary row.
-        fputcsv( $output, array() );
-        fputcsv( $output, array( 'Summary' ) );
-        fputcsv( $output, array( 'Total Images in Library', $results['total_images'] ) );
-        fputcsv( $output, array( 'Used Images', $results['used_count'] ) );
-        fputcsv( $output, array( 'Unused Images', $results['unused_count'] ) );
-        fputcsv( $output, array( 'Total Recoverable Space', size_format( $results['total_size'], 1 ) ) );
-
-        fclose( $output );
-        exit;
     }
 
     public static function ajax_delete() {
@@ -226,7 +254,6 @@ class UIF_Admin {
 
         $deleted = 0;
         foreach ( $ids as $id ) {
-            // Only delete if it's actually an image attachment.
             if ( 'attachment' !== get_post_type( $id ) ) {
                 continue;
             }
