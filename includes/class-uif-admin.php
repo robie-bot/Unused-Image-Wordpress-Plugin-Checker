@@ -11,7 +11,7 @@ class UIF_Admin {
         add_action( 'admin_enqueue_scripts', array( __CLASS__, 'enqueue_assets' ) );
         add_action( 'wp_ajax_uif_scan', array( __CLASS__, 'ajax_scan' ) );
         add_action( 'wp_ajax_uif_delete', array( __CLASS__, 'ajax_delete' ) );
-        add_action( 'admin_init', array( __CLASS__, 'handle_csv_export' ) );
+        add_action( 'admin_post_uif_export_csv', array( __CLASS__, 'handle_csv_export' ) );
     }
 
     public static function add_menu() {
@@ -47,7 +47,7 @@ class UIF_Admin {
         wp_localize_script( 'uif-admin', 'uif', array(
             'ajax_url'   => admin_url( 'admin-ajax.php' ),
             'nonce'      => wp_create_nonce( 'uif_nonce' ),
-            'csv_url'    => wp_nonce_url( admin_url( 'admin.php?uif_export_csv=1' ), 'uif_csv_export' ),
+            'csv_url'    => wp_nonce_url( admin_url( 'admin-post.php?action=uif_export_csv' ), 'uif_csv_export' ),
             'i18n'     => array(
                 'scanning'      => __( 'Scanning...', 'unused-image-finder' ),
                 'confirm'       => __( 'Are you sure you want to permanently delete the selected images? This cannot be undone.', 'unused-image-finder' ),
@@ -151,13 +151,8 @@ class UIF_Admin {
      * Handle CSV export via admin GET request.
      */
     public static function handle_csv_export() {
-        if (
-            ! isset( $_GET['uif_export_csv'] ) ||
-            '1' !== $_GET['uif_export_csv'] ||
-            ! isset( $_GET['_wpnonce'] ) ||
-            ! wp_verify_nonce( $_GET['_wpnonce'], 'uif_csv_export' )
-        ) {
-            return;
+        if ( ! isset( $_GET['_wpnonce'] ) || ! wp_verify_nonce( $_GET['_wpnonce'], 'uif_csv_export' ) ) {
+            wp_die( 'Invalid nonce.' );
         }
 
         if ( ! current_user_can( 'manage_options' ) ) {
