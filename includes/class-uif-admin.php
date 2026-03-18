@@ -11,6 +11,7 @@ class UIF_Admin {
         add_action( 'admin_enqueue_scripts', array( __CLASS__, 'enqueue_assets' ) );
         add_action( 'wp_ajax_uif_scan', array( __CLASS__, 'ajax_scan' ) );
         add_action( 'wp_ajax_uif_delete', array( __CLASS__, 'ajax_delete' ) );
+        add_action( 'admin_init', array( __CLASS__, 'handle_csv_export' ) );
     }
 
     public static function add_menu() {
@@ -44,8 +45,9 @@ class UIF_Admin {
         );
 
         wp_localize_script( 'uif-admin', 'uif', array(
-            'ajax_url' => admin_url( 'admin-ajax.php' ),
-            'nonce'    => wp_create_nonce( 'uif_nonce' ),
+            'ajax_url'   => admin_url( 'admin-ajax.php' ),
+            'nonce'      => wp_create_nonce( 'uif_nonce' ),
+            'csv_url'    => wp_nonce_url( admin_url( 'admin.php?uif_export_csv=1' ), 'uif_csv_export' ),
             'i18n'     => array(
                 'scanning'      => __( 'Scanning...', 'unused-image-finder' ),
                 'confirm'       => __( 'Are you sure you want to permanently delete the selected images? This cannot be undone.', 'unused-image-finder' ),
@@ -103,6 +105,9 @@ class UIF_Admin {
                         <button id="uif-delete-btn" class="button button-secondary" disabled>
                             <?php esc_html_e( 'Delete Selected', 'unused-image-finder' ); ?>
                         </button>
+                        <button id="uif-export-csv-btn" class="button button-secondary">
+                            <?php esc_html_e( 'Export CSV', 'unused-image-finder' ); ?>
+                        </button>
                         <span id="uif-selected-count"></span>
                     </div>
 
@@ -140,6 +145,75 @@ class UIF_Admin {
 
         $results = UIF_Scanner::scan();
         wp_send_json_success( $results );
+    }
+
+    /**
+     * Handle CSV export via admin GET request.
+     */
+    public static function handle_csv_export() {
+        if (
+            ! isset( $_GET['uif_export_csv'] ) ||
+            '1' !== $_GET['uif_export_csv'] ||
+            ! isset( $_GET['_wpnonce'] ) ||
+            ! wp_verify_nonce( $_GET['_wpnonce'], 'uif_csv_export' )
+        ) {
+            return;
+        }
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( 'Unauthorized' );
+        }
+
+        $results = UIF_Scanner::scan();
+
+        $filename = 'unused-images-' . date( 'Y-m-d-His' ) . '.csv';
+
+        header( 'Content-Type: text/csv; charset=utf-8' );
+        header( 'Content-Disposition: attachment; filename=' . $filename );
+        header( 'Pragma: no-cache' );
+        header( 'Expires: 0' );
+
+        $output = fopen( 'php://output', 'w' );
+
+        // UTF-8 BOM for Excel compatibility.
+        fprintf( $output, chr(0xEF) . chr(0xBB) . chr(0xBF) );
+
+        // Header row.
+        fputcsv( $output, array(
+            'ID',
+            'Title',
+            'Filename',
+            'URL',
+            'File Size (bytes)',
+            'File Size (readable)',
+            'Upload Date',
+            'Edit Link',
+        ) );
+
+        // Data rows.
+        foreach ( $results['unused_images'] as $img ) {
+            fputcsv( $output, array(
+                $img['id'],
+                $img['title'],
+                $img['filename'],
+                $img['url'],
+                $img['filesize'],
+                size_format( $img['filesize'], 1 ),
+                $img['date'],
+                $img['edit_link'],
+            ) );
+        }
+
+        // Summary row.
+        fputcsv( $output, array() );
+        fputcsv( $output, array( 'Summary' ) );
+        fputcsv( $output, array( 'Total Images in Library', $results['total_images'] ) );
+        fputcsv( $output, array( 'Used Images', $results['used_count'] ) );
+        fputcsv( $output, array( 'Unused Images', $results['unused_count'] ) );
+        fputcsv( $output, array( 'Total Recoverable Space', size_format( $results['total_size'], 1 ) ) );
+
+        fclose( $output );
+        exit;
     }
 
     public static function ajax_delete() {

@@ -183,6 +183,11 @@
         });
     });
 
+    // Export CSV.
+    $('#uif-export-csv-btn').on('click', function () {
+        window.location.href = uif.csv_url;
+    });
+
     // Single delete.
     $(document).on('click', '.uif-delete-single', function (e) {
         e.preventDefault();
