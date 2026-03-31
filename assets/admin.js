@@ -331,13 +331,13 @@
                     setTimeout(function () { runPhase(phaseIndex, totalPhases, phaseLabels, retries + 1); }, 2000);
                     return;
                 }
-                showNotice('Phase ' + (phaseIndex + 1) + ' failed after retries: ' + (res.data || uif.i18n.error), 'error');
-                scanDone();
-                return;
+                // Skip this phase and continue — don't abort the whole scan.
+                showNotice('Phase ' + (phaseIndex + 1) + ' (' + phaseLabels[phaseIndex] + ') skipped after retries. Scan continues.', 'warning');
             }
 
             var nextPhase = phaseIndex + 1;
-            var detail = 'Phase ' + (phaseIndex + 1) + ' of ' + totalPhases + ' complete — ' + res.data.total_used + ' used images found so far';
+            var usedSoFar = (res.success && res.data) ? res.data.total_used : '?';
+            var detail = 'Phase ' + (phaseIndex + 1) + ' of ' + totalPhases + ' complete — ' + usedSoFar + ' used images found so far';
             setProgress(phasePct, 'Scanning...', detail);
 
             if (nextPhase < totalPhases) {
@@ -352,8 +352,14 @@
                 setTimeout(function () { runPhase(phaseIndex, totalPhases, phaseLabels, retries + 1); }, 3000);
                 return;
             }
-            showNotice('Scan failed at phase ' + (phaseIndex + 1) + ' after ' + maxRetries + ' retries.', 'error');
-            scanDone();
+            // Skip this phase and continue — don't abort the whole scan.
+            showNotice('Phase ' + (phaseIndex + 1) + ' (' + phaseLabels[phaseIndex] + ') timed out and was skipped. Results may show more unused images than expected.', 'warning');
+            var nextPhase = phaseIndex + 1;
+            setProgress(phasePct, 'Scanning...', 'Phase ' + (phaseIndex + 1) + ' skipped, continuing...');
+            if (nextPhase < totalPhases) {
+                setProgress(null, null, 'Phase ' + (nextPhase + 1) + ' of ' + totalPhases + ': ' + phaseLabels[nextPhase]);
+            }
+            runPhase(nextPhase, totalPhases, phaseLabels, 0);
         });
     }
 
