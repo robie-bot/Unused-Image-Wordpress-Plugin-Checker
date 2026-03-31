@@ -775,86 +775,58 @@ class UIF_Scanner {
      * matter if the URL uses staging, CDN, or production domain.
      */
     /**
-     * Bulk content blob loader. Pulls all searchable content from the database
-     * into a SINGLE string so we can do fast PHP strpos() lookups instead of
-     * thousands of SQL LIKE queries.
+     * Helper: search a DB table column for ANY of the given filenames using
+     * batched OR queries (50 filenames per query). Returns the filenames found.
      *
-     * Called once, result is cached in a static variable.
-     *
-     * @return string Giant concatenated blob of all site content.
+     * @param string $table     Full table name.
+     * @param string $column    Column to search.
+     * @param array  $filenames List of filenames to look for.
+     * @param string $where     Extra WHERE clause (optional).
+     * @return array Filenames that were found in the column.
      */
-    private static function get_content_blob() {
-        static $blob = null;
-        if ( $blob !== null ) {
-            return $blob;
-        }
-
+    private static function batch_filename_search( $table, $column, $filenames, $where = '' ) {
         global $wpdb;
-        $parts = array();
+        $found     = array();
+        $batch_size = 50;
+        $chunks    = array_chunk( $filenames, $batch_size );
 
-        // Post content (pages, posts, CPTs — NOT attachments themselves).
-        $rows = $wpdb->get_col(
-            "SELECT post_content FROM {$wpdb->posts}
-             WHERE post_type != 'attachment'
-             AND post_status IN ('publish','draft','pending','private','future','inherit')
-             AND post_content != ''"
-        );
-        if ( $rows ) {
-            $parts[] = implode( "\n", $rows );
+        foreach ( $chunks as $chunk ) {
+            $conditions = array();
+            foreach ( $chunk as $filename ) {
+                $conditions[] = $wpdb->prepare(
+                    "{$column} LIKE %s",
+                    '%' . $wpdb->esc_like( $filename ) . '%'
+                );
+            }
+            $or_clause = implode( ' OR ', $conditions );
+            $sql       = "SELECT DISTINCT 1 AS hit, {$column} AS val FROM {$table} WHERE ({$or_clause})";
+            if ( $where ) {
+                $sql = "SELECT DISTINCT {$column} AS val FROM {$table} WHERE ({$or_clause}) AND ({$where})";
+            } else {
+                $sql = "SELECT DISTINCT {$column} AS val FROM {$table} WHERE ({$or_clause})";
+            }
+
+            $rows = $wpdb->get_col( $sql );
+            if ( ! $rows ) {
+                continue;
+            }
+
+            // Check which filenames from this chunk actually matched.
+            $content = implode( "\n", $rows );
+            foreach ( $chunk as $filename ) {
+                if ( stripos( $content, $filename ) !== false ) {
+                    $found[] = $filename;
+                }
+            }
+            unset( $rows, $content );
         }
-        unset( $rows );
 
-        // Postmeta values (skip attachment metadata & attached file — those are about the image itself).
-        $rows = $wpdb->get_col(
-            "SELECT meta_value FROM {$wpdb->postmeta}
-             WHERE meta_key NOT IN ('_wp_attached_file','_wp_attachment_metadata')
-             AND meta_value != ''
-             AND CHAR_LENGTH(meta_value) > 5"
-        );
-        if ( $rows ) {
-            $parts[] = implode( "\n", $rows );
-        }
-        unset( $rows );
-
-        // Options (theme mods, widget data, customizer, etc.)
-        $rows = $wpdb->get_col(
-            "SELECT option_value FROM {$wpdb->options}
-             WHERE option_value != ''
-             AND CHAR_LENGTH(option_value) > 5
-             AND option_name NOT LIKE '_transient%'
-             AND option_name NOT LIKE '_site_transient%'"
-        );
-        if ( $rows ) {
-            $parts[] = implode( "\n", $rows );
-        }
-        unset( $rows );
-
-        // Term meta.
-        $rows = $wpdb->get_col(
-            "SELECT meta_value FROM {$wpdb->termmeta}
-             WHERE meta_value != ''
-             AND CHAR_LENGTH(meta_value) > 5"
-        );
-        if ( $rows ) {
-            $parts[] = implode( "\n", $rows );
-        }
-        unset( $rows );
-
-        $blob = implode( "\n", $parts );
-        unset( $parts );
-
-        return $blob;
+        return $found;
     }
 
     private static function get_filename_referenced_ids() {
-        $ids = array();
-
-        $blob = self::get_content_blob();
-        if ( empty( $blob ) ) {
-            return $ids;
-        }
-
         global $wpdb;
+        $ids = array();
 
         // Build filename => ID lookup from _wp_attached_file meta.
         $attachments = $wpdb->get_results(
@@ -870,11 +842,63 @@ class UIF_Scanner {
             return $ids;
         }
 
-        // Simple PHP strpos() against the blob — no SQL queries in the loop.
+        $by_filename = array();
         foreach ( $attachments as $att ) {
             $basename = basename( $att->filepath );
-            if ( stripos( $blob, $basename ) !== false ) {
-                $ids[] = (int) $att->ID;
+            $by_filename[ $basename ][] = (int) $att->ID;
+        }
+
+        $filenames = array_keys( $by_filename );
+        $found_all = array();
+
+        // Search wp_posts.post_content.
+        $found = self::batch_filename_search(
+            $wpdb->posts,
+            'post_content',
+            $filenames,
+            "post_type != 'attachment' AND post_status IN ('publish','draft','pending','private','future','inherit')"
+        );
+        $found_all = array_merge( $found_all, $found );
+
+        // Only search remaining filenames in postmeta.
+        $remaining = array_diff( $filenames, $found_all );
+        if ( $remaining ) {
+            $found = self::batch_filename_search(
+                $wpdb->postmeta,
+                'meta_value',
+                array_values( $remaining ),
+                "meta_key NOT IN ('_wp_attached_file','_wp_attachment_metadata')"
+            );
+            $found_all = array_merge( $found_all, $found );
+        }
+
+        // Only search remaining in options.
+        $remaining = array_diff( $filenames, $found_all );
+        if ( $remaining ) {
+            $found = self::batch_filename_search(
+                $wpdb->options,
+                'option_value',
+                array_values( $remaining ),
+                "option_name NOT LIKE '_transient%' AND option_name NOT LIKE '_site_transient%'"
+            );
+            $found_all = array_merge( $found_all, $found );
+        }
+
+        // Only search remaining in termmeta.
+        $remaining = array_diff( $filenames, $found_all );
+        if ( $remaining ) {
+            $found = self::batch_filename_search(
+                $wpdb->termmeta,
+                'meta_value',
+                array_values( $remaining )
+            );
+            $found_all = array_merge( $found_all, $found );
+        }
+
+        // Map found filenames back to IDs.
+        foreach ( $found_all as $filename ) {
+            if ( isset( $by_filename[ $filename ] ) ) {
+                $ids = array_merge( $ids, $by_filename[ $filename ] );
             }
         }
 
@@ -918,12 +942,7 @@ class UIF_Scanner {
 
         // 3. Reverse lookup: if a .webp/.avif version of an image filename is
         //    found in site content, mark the original as used.
-        //    Reuses the cached content blob — no extra DB queries.
-        $blob = self::get_content_blob();
-        if ( empty( $blob ) ) {
-            return $ids;
-        }
-
+        //    Uses batched SQL — no giant memory blob needed.
         $used_set = array_flip( array_unique( array_filter( array_map( 'absint', $used ) ) ) );
 
         $all_meta = $wpdb->get_results(
@@ -931,30 +950,71 @@ class UIF_Scanner {
              WHERE meta_key = '_wp_attached_file'"
         );
 
+        // Build variant filenames for images NOT already marked as used.
+        $variant_map = array(); // variant_filename => post_id
         foreach ( $all_meta as $row ) {
             $post_id = (int) $row->post_id;
-
-            // Skip if already used.
             if ( isset( $used_set[ $post_id ] ) ) {
                 continue;
             }
 
-            $basename    = wp_basename( $row->meta_value );          // photo.jpg
-            $name_no_ext = pathinfo( $basename, PATHINFO_FILENAME ); // photo
+            $basename    = wp_basename( $row->meta_value );
+            $name_no_ext = pathinfo( $basename, PATHINFO_FILENAME );
 
-            // Check if WebP/AVIF variant filenames appear in content.
             $variants = array(
-                $basename . '.webp',      // photo.jpg.webp
-                $basename . '.avif',      // photo.jpg.avif
-                $name_no_ext . '.webp',   // photo.webp
-                $name_no_ext . '.avif',   // photo.avif
+                $basename . '.webp',
+                $basename . '.avif',
+                $name_no_ext . '.webp',
+                $name_no_ext . '.avif',
             );
 
-            foreach ( $variants as $variant ) {
-                if ( stripos( $blob, $variant ) !== false ) {
-                    $ids[] = $post_id;
-                    break;
-                }
+            foreach ( $variants as $v ) {
+                $variant_map[ $v ] = $post_id;
+            }
+        }
+
+        if ( empty( $variant_map ) ) {
+            return $ids;
+        }
+
+        $variant_names = array_keys( $variant_map );
+        $found_all     = array();
+
+        // Search posts.
+        $found = self::batch_filename_search(
+            $wpdb->posts,
+            'post_content',
+            $variant_names,
+            "post_content != ''"
+        );
+        $found_all = array_merge( $found_all, $found );
+
+        // Search postmeta.
+        $remaining = array_diff( $variant_names, $found_all );
+        if ( $remaining ) {
+            $found = self::batch_filename_search(
+                $wpdb->postmeta,
+                'meta_value',
+                array_values( $remaining )
+            );
+            $found_all = array_merge( $found_all, $found );
+        }
+
+        // Search options.
+        $remaining = array_diff( $variant_names, $found_all );
+        if ( $remaining ) {
+            $found = self::batch_filename_search(
+                $wpdb->options,
+                'option_value',
+                array_values( $remaining )
+            );
+            $found_all = array_merge( $found_all, $found );
+        }
+
+        // Map found variants back to original attachment IDs.
+        foreach ( $found_all as $variant ) {
+            if ( isset( $variant_map[ $variant ] ) ) {
+                $ids[] = $variant_map[ $variant ];
             }
         }
 
