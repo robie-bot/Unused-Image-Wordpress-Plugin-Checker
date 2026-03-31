@@ -40,6 +40,10 @@ class UIF_Scanner {
         $used = array_merge( $used, self::get_site_icon_ids() );
         $used = array_merge( $used, self::get_css_background_image_ids() );
 
+        // Nuclear option: search entire database for each image filename.
+        // This catches ANY reference regardless of domain, builder, or storage format.
+        $used = array_merge( $used, self::get_filename_referenced_ids() );
+
         $used = apply_filters( 'uif_used_image_ids', $used );
 
         return array_unique( array_filter( array_map( 'absint', $used ) ) );
@@ -753,6 +757,131 @@ class UIF_Scanner {
 
         foreach ( $term_url_meta as $val ) {
             $extract( $val );
+        }
+
+        return $ids;
+    }
+
+    /**
+     * Filename-based search across the ENTIRE database.
+     *
+     * Builds a lookup map of filename => attachment ID from _wp_attached_file,
+     * then searches wp_posts, wp_postmeta, wp_options, and wp_termmeta for
+     * any occurrence of each filename. This is domain-agnostic — it doesn't
+     * matter if the URL uses staging, CDN, or production domain.
+     */
+    private static function get_filename_referenced_ids() {
+        global $wpdb;
+        $ids = array();
+
+        // 1. Build filename => ID lookup from _wp_attached_file meta.
+        // The meta stores relative paths like "2025/09/22Website-Banner-Images.png".
+        $attachments = $wpdb->get_results(
+            "SELECT p.ID, pm.meta_value AS filepath
+             FROM {$wpdb->posts} p
+             INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id AND pm.meta_key = '_wp_attached_file'
+             WHERE p.post_type = 'attachment'
+             AND p.post_mime_type LIKE 'image/%'
+             AND p.post_status = 'inherit'"
+        );
+
+        if ( empty( $attachments ) ) {
+            return $ids;
+        }
+
+        // Build lookup: basename => [ {id, filepath}, ... ]
+        // and filepath => id
+        $by_filename = array();
+        $by_filepath = array();
+
+        foreach ( $attachments as $att ) {
+            $basename = basename( $att->filepath );
+            $by_filename[ $basename ][] = $att->ID;
+            $by_filepath[ $att->filepath ] = $att->ID;
+        }
+
+        // 2. Search each table for filename occurrences.
+        //    Use SQL LIKE for each unique filename. Process in batches to avoid
+        //    huge queries.
+
+        $filenames = array_keys( $by_filename );
+
+        // Search wp_posts.post_content — most images are referenced here.
+        foreach ( $filenames as $filename ) {
+            $escaped = $wpdb->esc_like( $filename );
+            $found = $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->posts}
+                     WHERE post_type != 'attachment'
+                     AND post_status IN ('publish','draft','pending','private','future','inherit')
+                     AND post_content LIKE %s
+                     LIMIT 1",
+                    '%' . $escaped . '%'
+                )
+            );
+            if ( $found > 0 ) {
+                $ids = array_merge( $ids, $by_filename[ $filename ] );
+            }
+        }
+
+        // Search wp_postmeta.meta_value.
+        foreach ( $filenames as $filename ) {
+            // Skip if already found.
+            if ( ! empty( array_intersect( $by_filename[ $filename ], $ids ) ) ) {
+                continue;
+            }
+            $escaped = $wpdb->esc_like( $filename );
+            $found = $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->postmeta}
+                     WHERE meta_key != '_wp_attached_file'
+                     AND meta_key != '_wp_attachment_metadata'
+                     AND meta_value LIKE %s
+                     LIMIT 1",
+                    '%' . $escaped . '%'
+                )
+            );
+            if ( $found > 0 ) {
+                $ids = array_merge( $ids, $by_filename[ $filename ] );
+            }
+        }
+
+        // Search wp_options.option_value.
+        foreach ( $filenames as $filename ) {
+            if ( ! empty( array_intersect( $by_filename[ $filename ], $ids ) ) ) {
+                continue;
+            }
+            $escaped = $wpdb->esc_like( $filename );
+            $found = $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->options}
+                     WHERE option_value LIKE %s
+                     LIMIT 1",
+                    '%' . $escaped . '%'
+                )
+            );
+            if ( $found > 0 ) {
+                $ids = array_merge( $ids, $by_filename[ $filename ] );
+            }
+        }
+
+        // Search wp_termmeta.meta_value.
+        foreach ( $filenames as $filename ) {
+            if ( ! empty( array_intersect( $by_filename[ $filename ], $ids ) ) ) {
+                continue;
+            }
+            $escaped = $wpdb->esc_like( $filename );
+            $found = $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->termmeta}
+                     WHERE meta_value LIKE %s
+                     LIMIT 1",
+                    '%' . $escaped . '%'
+                )
+            );
+            if ( $found > 0 ) {
+                $ids = array_merge( $ids, $by_filename[ $filename ] );
+            }
         }
 
         return $ids;
