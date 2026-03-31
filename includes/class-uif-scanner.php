@@ -518,100 +518,119 @@ class UIF_Scanner {
         $upload_dir = wp_get_upload_dir();
         $base_url   = preg_quote( $upload_dir['baseurl'], '/' );
 
-        // 1. Impreza uses [us_*] shortcodes in post_content.
-        $contents = $wpdb->get_col(
+        // Helper: extract image IDs and URLs from any content string.
+        $extract = function ( $content ) use ( &$ids, $base_url ) {
+            // Numeric image/images attributes on [us_*] shortcodes.
+            if ( preg_match_all( '/\[us_\w+[^\]]*\s(?:image|images|img|logo|photo|icon|media|thumbnail|ids|include)=["\']?([\d,]+)["\']?/', $content, $m ) ) {
+                foreach ( $m[1] as $id_string ) {
+                    $ids = array_merge( $ids, explode( ',', $id_string ) );
+                }
+            }
+
+            // Also catch WPBakery [vc_*] shortcodes inside Impreza layouts.
+            if ( preg_match_all( '/\[vc_\w+[^\]]*\s(?:image|images|img_id|photo|include)=["\']?([\d,]+)["\']?/', $content, $m ) ) {
+                foreach ( $m[1] as $id_string ) {
+                    $ids = array_merge( $ids, explode( ',', $id_string ) );
+                }
+            }
+
+            // Generic shortcode attribute patterns: gallery_ids="1,2,3", image_id="123".
+            if ( preg_match_all( '/(?:gallery_ids|image_id|media_id|attachment_id|bg_image)=["\']?([\d,]+)["\']?/', $content, $m ) ) {
+                foreach ( $m[1] as $id_string ) {
+                    $ids = array_merge( $ids, explode( ',', $id_string ) );
+                }
+            }
+
+            // Any upload URLs in the content.
+            if ( preg_match_all( '/' . $base_url . '\/[^\s"\'<>\]\[)]+/i', $content, $m ) ) {
+                foreach ( $m[0] as $url ) {
+                    $found = self::url_to_attachment_id( $url );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+
+            // JSON-style "id":123 or "id":"123" (used in Gutenberg/builder data).
+            if ( preg_match_all( '/"id"\s*:\s*"?(\d+)"?/', $content, $m ) ) {
+                $ids = array_merge( $ids, $m[1] );
+            }
+        };
+
+        // 1. ALL Impreza post types — post_content (any status, including drafts and auto-drafts).
+        $impreza_post_types = array(
+            'us_page_block',
+            'us_content_template',
+            'us_header',
+            'us_footer',
+            'us_grid_layout',
+        );
+        $pt_placeholders = implode( ',', array_fill( 0, count( $impreza_post_types ), '%s' ) );
+
+        $impreza_contents = $wpdb->get_col(
+            $wpdb->prepare(
+                "SELECT post_content FROM {$wpdb->posts}
+                 WHERE post_type IN ($pt_placeholders)
+                 AND post_content != ''",
+                $impreza_post_types
+            )
+        );
+
+        foreach ( $impreza_contents as $content ) {
+            $extract( $content );
+        }
+
+        // 2. Regular posts/pages containing [us_*] shortcodes.
+        $us_contents = $wpdb->get_col(
             "SELECT post_content FROM {$wpdb->posts}
              WHERE post_status IN ('publish','draft','pending','private','future')
              AND post_content LIKE '%[us_%'"
         );
 
-        foreach ( $contents as $content ) {
-            // image="123" or images="1,2,3" attributes on [us_*] shortcodes.
-            if ( preg_match_all( '/\[us_\w+[^\]]*\s(?:image|images|img|logo|photo|icon|media)=["\']?([\d,]+)["\']?/', $content, $m ) ) {
-                foreach ( $m[1] as $id_string ) {
-                    $ids = array_merge( $ids, explode( ',', $id_string ) );
-                }
-            }
-
-            // [us_image image="123"], [us_image_slider ids="1,2,3"].
-            if ( preg_match_all( '/\[us_image[^\]]*image=["\']?(\d+)["\']?/', $content, $m ) ) {
-                $ids = array_merge( $ids, $m[1] );
-            }
-            if ( preg_match_all( '/\[us_image_slider[^\]]*ids=["\']?([\d,]+)["\']?/', $content, $m ) ) {
-                foreach ( $m[1] as $id_string ) {
-                    $ids = array_merge( $ids, explode( ',', $id_string ) );
-                }
-            }
-
-            // [us_gallery ids="1,2,3"].
-            if ( preg_match_all( '/\[us_gallery[^\]]*ids=["\']?([\d,]+)["\']?/', $content, $m ) ) {
-                foreach ( $m[1] as $id_string ) {
-                    $ids = array_merge( $ids, explode( ',', $id_string ) );
-                }
-            }
-
-            // Background image URLs in us_ shortcode attributes.
-            if ( preg_match_all( '/' . $base_url . '\/[^\s"\'<>\]\[)]+/i', $content, $m ) ) {
-                foreach ( $m[0] as $url ) {
-                    $found = self::url_to_attachment_id( $url );
-                    if ( $found ) {
-                        $ids[] = $found;
-                    }
-                }
-            }
+        foreach ( $us_contents as $content ) {
+            $extract( $content );
         }
 
-        // 2. Impreza reusable blocks / page templates (us_page_block, us_content_template).
-        $impreza_blocks = $wpdb->get_col(
-            "SELECT post_content FROM {$wpdb->posts}
-             WHERE post_type IN ('us_page_block','us_content_template','us_header','us_footer','us_grid_layout')
-             AND post_content != ''"
+        // 3. ALL postmeta for Impreza post types (grid layouts store settings in meta).
+        $impreza_meta = $wpdb->get_col(
+            $wpdb->prepare(
+                "SELECT pm.meta_value FROM {$wpdb->postmeta} pm
+                 INNER JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+                 WHERE p.post_type IN ($pt_placeholders)
+                 AND pm.meta_value != ''
+                 AND pm.meta_value != '0'",
+                $impreza_post_types
+            )
         );
 
-        foreach ( $impreza_blocks as $content ) {
-            if ( preg_match_all( '/\[us_\w+[^\]]*\s(?:image|images|img|logo|photo|icon|media)=["\']?([\d,]+)["\']?/', $content, $m ) ) {
-                foreach ( $m[1] as $id_string ) {
-                    $ids = array_merge( $ids, explode( ',', $id_string ) );
-                }
+        foreach ( $impreza_meta as $meta_val ) {
+            // Numeric attachment ID.
+            if ( is_numeric( $meta_val ) && (int) $meta_val > 0 ) {
+                $ids[] = $meta_val;
+                continue;
             }
-            if ( preg_match_all( '/' . $base_url . '\/[^\s"\'<>\]\[)]+/i', $content, $m ) ) {
-                foreach ( $m[0] as $url ) {
-                    $found = self::url_to_attachment_id( $url );
-                    if ( $found ) {
-                        $ids[] = $found;
-                    }
+
+            // Serialized or JSON data.
+            $unserialized = maybe_unserialize( $meta_val );
+            if ( is_array( $unserialized ) || is_object( $unserialized ) ) {
+                $json = wp_json_encode( $unserialized );
+                $extract( $json );
+
+                // Also walk arrays for numeric IDs.
+                if ( is_array( $unserialized ) ) {
+                    array_walk_recursive( $unserialized, function ( $val ) use ( &$ids ) {
+                        if ( is_numeric( $val ) && (int) $val > 0 ) {
+                            $ids[] = $val;
+                        }
+                    } );
                 }
+            } elseif ( is_string( $meta_val ) && strlen( $meta_val ) > 10 ) {
+                // Longer strings might contain URLs or shortcodes.
+                $extract( $meta_val );
             }
         }
 
-        // 3. Impreza theme options (stored in wp_options as 'usof_options').
-        $impreza_options = $wpdb->get_col(
-            "SELECT option_value FROM {$wpdb->options}
-             WHERE option_name IN ('usof_options','us_theme_options')
-             OR option_name LIKE 'usof_%'"
-        );
-
-        foreach ( $impreza_options as $data ) {
-            $unserialized = maybe_unserialize( $data );
-            $json         = wp_json_encode( $unserialized );
-
-            // Numeric IDs stored as values.
-            if ( preg_match_all( '/"(?:logo|favicon|og_image|custom_icon|header_image)[^"]*"\s*:\s*"?(\d+)"?/', $json, $m ) ) {
-                $ids = array_merge( $ids, $m[1] );
-            }
-
-            // Upload URLs in theme options.
-            if ( preg_match_all( '/' . $base_url . '\/[^\s"\'<>\\\\]+/i', $json, $m ) ) {
-                foreach ( $m[0] as $url ) {
-                    $found = self::url_to_attachment_id( $url );
-                    if ( $found ) {
-                        $ids[] = $found;
-                    }
-                }
-            }
-        }
-
-        // 4. Impreza meta boxes store image IDs in postmeta with us_ prefix.
+        // 4. Postmeta with us_ prefix on ANY post type (titlebar images, page settings, etc.).
         $us_meta = $wpdb->get_col(
             "SELECT DISTINCT pm.meta_value
              FROM {$wpdb->postmeta} pm
@@ -622,6 +641,69 @@ class UIF_Scanner {
         );
 
         $ids = array_merge( $ids, $us_meta );
+
+        // 5. Postmeta with us_ prefix that contain URLs (not just numeric IDs).
+        $us_url_meta = $wpdb->get_col(
+            "SELECT pm.meta_value FROM {$wpdb->postmeta} pm
+             WHERE pm.meta_key LIKE 'us_%'
+             AND pm.meta_value LIKE '%" . $wpdb->esc_like( $upload_dir['baseurl'] ) . "%'"
+        );
+
+        foreach ( $us_url_meta as $val ) {
+            $extract( $val );
+        }
+
+        // 6. Impreza theme options (stored in wp_options as 'usof_options').
+        $impreza_options = $wpdb->get_col(
+            "SELECT option_value FROM {$wpdb->options}
+             WHERE option_name IN ('usof_options','us_theme_options')
+             OR option_name LIKE 'usof_%'
+             OR option_name LIKE 'us_%'"
+        );
+
+        foreach ( $impreza_options as $data ) {
+            $unserialized = maybe_unserialize( $data );
+            $json         = wp_json_encode( $unserialized );
+
+            // Any numeric value that's an attachment.
+            if ( preg_match_all( '/"[^"]*"\s*:\s*"?(\d+)"?/', $json, $m ) ) {
+                $ids = array_merge( $ids, $m[1] );
+            }
+
+            // Upload URLs in theme options.
+            $extract( $json );
+        }
+
+        // 7. Term meta — Impreza allows images on categories/tags.
+        $term_meta = $wpdb->get_col(
+            "SELECT meta_value FROM {$wpdb->termmeta}
+             WHERE meta_value REGEXP '^[0-9]+$'
+             AND CAST(meta_value AS UNSIGNED) > 0"
+        );
+
+        // Only keep values that are actual attachments.
+        if ( ! empty( $term_meta ) ) {
+            $term_placeholders = implode( ',', array_fill( 0, count( $term_meta ), '%d' ) );
+            $valid_term_ids = $wpdb->get_col(
+                $wpdb->prepare(
+                    "SELECT ID FROM {$wpdb->posts}
+                     WHERE ID IN ($term_placeholders)
+                     AND post_type = 'attachment'",
+                    $term_meta
+                )
+            );
+            $ids = array_merge( $ids, $valid_term_ids );
+        }
+
+        // Term meta with URLs.
+        $term_url_meta = $wpdb->get_col(
+            "SELECT meta_value FROM {$wpdb->termmeta}
+             WHERE meta_value LIKE '%" . $wpdb->esc_like( $upload_dir['baseurl'] ) . "%'"
+        );
+
+        foreach ( $term_url_meta as $val ) {
+            $extract( $val );
+        }
 
         return $ids;
     }
