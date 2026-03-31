@@ -115,8 +115,9 @@ class UIF_Scanner {
 
         $upload_dir  = wp_get_upload_dir();
         $base_url    = preg_quote( $upload_dir['baseurl'], '/' );
-        // Path-only pattern catches any domain (staging, CDN, old domain).
-        $upload_path = preg_quote( $upload_dir['subdir'] ? '/wp-content/uploads' : wp_parse_url( $upload_dir['baseurl'], PHP_URL_PATH ), '/' );
+        // Path-only pattern: always use the base upload path (not the monthly subdir).
+        $upload_base_path = wp_parse_url( $upload_dir['baseurl'], PHP_URL_PATH ); // e.g. /wp-content/uploads
+        $upload_path_re   = preg_quote( $upload_base_path, '/' );
 
         foreach ( $contents as $content ) {
             // wp-image-{id} class used by the editor.
@@ -125,7 +126,7 @@ class UIF_Scanner {
             }
 
             // Direct URL references matching current site upload URL.
-            if ( preg_match_all( '/' . $base_url . '\/[^\s"\'<>]+/i', $content, $m ) ) {
+            if ( preg_match_all( '/' . $base_url . '\/[^\s"\'<>)]+/i', $content, $m ) ) {
                 foreach ( $m[0] as $url ) {
                     $found = self::url_to_attachment_id( $url );
                     if ( $found ) {
@@ -136,7 +137,7 @@ class UIF_Scanner {
 
             // Cross-domain: any https?:// URL pointing to /wp-content/uploads/ path.
             // Catches staging URLs, CDN URLs, old domain references.
-            if ( preg_match_all( '/https?:\/\/[^\s"\'<>]*' . $upload_path . '\/[^\s"\'<>)]+/i', $content, $m ) ) {
+            if ( preg_match_all( '/https?:\/\/[^\s"\'<>)]*' . $upload_path_re . '\/[^\s"\'<>)]+/i', $content, $m ) ) {
                 foreach ( $m[0] as $url ) {
                     $found = self::url_to_attachment_id_cross_domain( $url );
                     if ( $found ) {
@@ -743,10 +744,11 @@ class UIF_Scanner {
             $ids = array_merge( $ids, $valid_term_ids );
         }
 
-        // Term meta with URLs.
+        // Term meta with URLs (search by path, not domain, to catch staging/CDN URLs).
+        $upload_base_path = wp_parse_url( $upload_dir['baseurl'], PHP_URL_PATH );
         $term_url_meta = $wpdb->get_col(
             "SELECT meta_value FROM {$wpdb->termmeta}
-             WHERE meta_value LIKE '%" . $wpdb->esc_like( $upload_dir['baseurl'] ) . "%'"
+             WHERE meta_value LIKE '%" . $wpdb->esc_like( $upload_base_path ) . "%'"
         );
 
         foreach ( $term_url_meta as $val ) {
@@ -773,21 +775,39 @@ class UIF_Scanner {
         global $wpdb;
         $ids = array();
 
-        $upload_dir = wp_get_upload_dir();
-        $base_url   = preg_quote( $upload_dir['baseurl'], '/' );
+        $upload_dir      = wp_get_upload_dir();
+        $base_url        = preg_quote( $upload_dir['baseurl'], '/' );
+        $upload_base_path = wp_parse_url( $upload_dir['baseurl'], PHP_URL_PATH ); // e.g. /wp-content/uploads
+        $upload_path_re  = preg_quote( $upload_base_path, '/' );
 
-        // Regex matches both background:url() and background-image:url()
-        // including shorthand like background: #fff url(...) no-repeat;
-        $upload_dir  = wp_get_upload_dir();
-        $upload_path = preg_quote( wp_parse_url( $upload_dir['baseurl'], PHP_URL_PATH ), '/' );
-
-        // Matches current-domain upload URLs.
+        // Matches current-domain upload URLs in background/background-image.
         $bg_regex = '/background(?:-image)?\s*:[^;}]*url\(\s*["\']?(' . $base_url . '\/[^\s"\'<>)]+)["\']?\s*\)/i';
 
         // Matches ANY domain's /wp-content/uploads/ path (staging, CDN, old domain).
-        $bg_regex_cross = '/background(?:-image)?\s*:[^;}]*url\(\s*["\']?(https?:\/\/[^\s"\'<>)]*' . $upload_path . '\/[^\s"\'<>)]+)["\']?\s*\)/i';
+        $bg_regex_cross = '/background(?:-image)?\s*:[^;}]*url\(\s*["\']?(https?:\/\/[^\s"\'<>)]*' . $upload_path_re . '\/[^\s"\'<>)]+)["\']?\s*\)/i';
+
+        // Helper: extract from both current-domain and cross-domain patterns.
+        $extract_bg = function ( $text ) use ( &$ids, $bg_regex, $bg_regex_cross ) {
+            if ( preg_match_all( $bg_regex, $text, $m ) ) {
+                foreach ( $m[1] as $url ) {
+                    $found = self::url_to_attachment_id( $url );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+            if ( preg_match_all( $bg_regex_cross, $text, $m ) ) {
+                foreach ( $m[1] as $url ) {
+                    $found = self::url_to_attachment_id_cross_domain( $url );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+        };
 
         // 1. All post content (catches inline styles in any builder/editor).
+        //    Use broad LIKE — just look for background + url(, no domain filter.
         $contents = $wpdb->get_col(
             "SELECT post_content FROM {$wpdb->posts}
              WHERE post_status IN ('publish','draft','pending','private','future')
@@ -796,24 +816,7 @@ class UIF_Scanner {
         );
 
         foreach ( $contents as $content ) {
-            // Current-domain matches.
-            if ( preg_match_all( $bg_regex, $content, $m ) ) {
-                foreach ( $m[1] as $url ) {
-                    $found = self::url_to_attachment_id( $url );
-                    if ( $found ) {
-                        $ids[] = $found;
-                    }
-                }
-            }
-            // Cross-domain matches (staging/CDN/old domain).
-            if ( preg_match_all( $bg_regex_cross, $content, $m ) ) {
-                foreach ( $m[1] as $url ) {
-                    $found = self::url_to_attachment_id_cross_domain( $url );
-                    if ( $found ) {
-                        $ids[] = $found;
-                    }
-                }
-            }
+            $extract_bg( $content );
         }
 
         // 2. WordPress Customizer Additional CSS (stored as custom_css post type).
@@ -824,33 +827,20 @@ class UIF_Scanner {
         );
 
         foreach ( $custom_css_posts as $css ) {
-            if ( preg_match_all( $bg_regex, $css, $m ) ) {
-                foreach ( $m[1] as $url ) {
-                    $found = self::url_to_attachment_id( $url );
-                    if ( $found ) {
-                        $ids[] = $found;
-                    }
-                }
-            }
+            $extract_bg( $css );
         }
 
         // 3. All postmeta that contains background url() (covers builder custom CSS fields).
+        //    Search for /wp-content/uploads path, not a specific domain.
         $meta_css = $wpdb->get_col(
             "SELECT meta_value FROM {$wpdb->postmeta}
              WHERE meta_value LIKE '%background%'
              AND meta_value LIKE '%url(%'
-             AND meta_value LIKE '%" . $wpdb->esc_like( $upload_dir['baseurl'] ) . "%'"
+             AND meta_value LIKE '%" . $wpdb->esc_like( $upload_base_path ) . "%'"
         );
 
         foreach ( $meta_css as $css ) {
-            if ( preg_match_all( $bg_regex, $css, $m ) ) {
-                foreach ( $m[1] as $url ) {
-                    $found = self::url_to_attachment_id( $url );
-                    if ( $found ) {
-                        $ids[] = $found;
-                    }
-                }
-            }
+            $extract_bg( $css );
         }
 
         // 4. wp_options that contain background url() (theme custom CSS options).
@@ -858,18 +848,11 @@ class UIF_Scanner {
             "SELECT option_value FROM {$wpdb->options}
              WHERE option_value LIKE '%background%'
              AND option_value LIKE '%url(%'
-             AND option_value LIKE '%" . $wpdb->esc_like( $upload_dir['baseurl'] ) . "%'"
+             AND option_value LIKE '%" . $wpdb->esc_like( $upload_base_path ) . "%'"
         );
 
         foreach ( $option_css as $css ) {
-            if ( preg_match_all( $bg_regex, $css, $m ) ) {
-                foreach ( $m[1] as $url ) {
-                    $found = self::url_to_attachment_id( $url );
-                    if ( $found ) {
-                        $ids[] = $found;
-                    }
-                }
-            }
+            $extract_bg( $css );
         }
 
         return $ids;
