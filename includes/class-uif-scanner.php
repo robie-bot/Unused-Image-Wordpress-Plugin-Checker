@@ -902,95 +902,9 @@ class UIF_Scanner {
         global $wpdb;
         $ids = array();
 
-        if ( empty( $used ) ) {
-            return $ids;
-        }
-
-        $used_set = array_unique( array_filter( array_map( 'absint', $used ) ) );
-
-        // 1. For every image in the library, if a WebP/AVIF sibling file exists
-        //    AND the original's filename was found in $used (via filename search),
-        //    we already have it. But we also need the reverse: if the WebP/AVIF
-        //    version is referenced in content but the original attachment is not
-        //    yet in $used, mark the original as used.
-        //
-        // Strategy: query ALL image attachments, check if a .webp/.avif variant
-        // of their filename appears in post content / postmeta / options.
-
-        $all_images = $wpdb->get_results(
-            "SELECT ID, guid FROM {$wpdb->posts}
-             WHERE post_type = 'attachment'
-             AND post_mime_type LIKE 'image/%'
-             AND post_status = 'inherit'"
-        );
-
-        foreach ( $all_images as $img ) {
-            $img_id = (int) $img->ID;
-
-            // Skip if already marked as used.
-            if ( in_array( $img_id, $used_set, true ) ) {
-                continue;
-            }
-
-            $file = get_attached_file( $img_id );
-            if ( ! $file || ! file_exists( $file ) ) {
-                continue;
-            }
-
-            $basename = wp_basename( $file );                // e.g. photo.jpg
-            $name_no_ext = pathinfo( $basename, PATHINFO_FILENAME ); // e.g. photo
-
-            // Build possible WebP / AVIF filenames that Imagify (or others) create.
-            $variants = array(
-                $basename . '.webp',          // photo.jpg.webp  (Imagify default)
-                $basename . '.avif',          // photo.jpg.avif
-                $name_no_ext . '.webp',       // photo.webp
-                $name_no_ext . '.avif',       // photo.avif
-            );
-
-            // Check if any variant filename is referenced in content.
-            foreach ( $variants as $variant ) {
-                $esc = '%' . $wpdb->esc_like( $variant ) . '%';
-
-                // Search post_content.
-                $found = $wpdb->get_var( $wpdb->prepare(
-                    "SELECT 1 FROM {$wpdb->posts}
-                     WHERE post_content LIKE %s
-                     LIMIT 1",
-                    $esc
-                ) );
-
-                if ( ! $found ) {
-                    // Search postmeta values.
-                    $found = $wpdb->get_var( $wpdb->prepare(
-                        "SELECT 1 FROM {$wpdb->postmeta}
-                         WHERE meta_value LIKE %s
-                         LIMIT 1",
-                        $esc
-                    ) );
-                }
-
-                if ( ! $found ) {
-                    // Search options.
-                    $found = $wpdb->get_var( $wpdb->prepare(
-                        "SELECT 1 FROM {$wpdb->options}
-                         WHERE option_value LIKE %s
-                         LIMIT 1",
-                        $esc
-                    ) );
-                }
-
-                if ( $found ) {
-                    $ids[] = $img_id;
-                    break; // One match is enough.
-                }
-            }
-        }
-
-        // 2. Imagify stores optimization data in postmeta key '_imagify_data'.
-        //    Any attachment with Imagify data has a backup original that should
-        //    not be deleted — the original is the attachment itself.
-        //    Also check '_imagify_status' for any optimized image.
+        // 1. Imagify / optimizer meta: any image that has been optimized should
+        //    be protected — the attachment IS the original backup.
+        //    This is fast: just 2 simple meta_key lookups.
         $imagify_ids = $wpdb->get_col(
             "SELECT DISTINCT post_id FROM {$wpdb->postmeta}
              WHERE meta_key IN ('_imagify_data', '_imagify_status')
@@ -1002,21 +916,114 @@ class UIF_Scanner {
             $ids = array_merge( $ids, $imagify_ids );
         }
 
-        // 3. ShortPixel, EWWW, and other optimizers store similar meta.
-        //    Catch the most common ones.
-        $optimizer_keys = array(
-            '_wp_attachment_backup_sizes',  // WP core backup sizes (used by many optimizers)
-        );
-        $placeholders = implode( ',', array_fill( 0, count( $optimizer_keys ), '%s' ) );
-        $backup_ids = $wpdb->get_col( $wpdb->prepare(
+        // 2. WP core backup sizes (used by Imagify, EWWW, ShortPixel, etc.)
+        $backup_ids = $wpdb->get_col(
             "SELECT DISTINCT post_id FROM {$wpdb->postmeta}
-             WHERE meta_key IN ($placeholders)
-             AND meta_value != ''",
-            ...$optimizer_keys
-        ) );
+             WHERE meta_key = '_wp_attachment_backup_sizes'
+             AND meta_value != ''"
+        );
 
         if ( $backup_ids ) {
             $ids = array_merge( $ids, $backup_ids );
+        }
+
+        // 3. Reverse lookup: if a .webp or .avif version of an image filename
+        //    is referenced in the database, mark the original as used.
+        //    Instead of querying per-image, we do ONE query to pull all .webp/.avif
+        //    references from the DB, then map them back to original attachments.
+        $webp_avif_refs = array();
+
+        // Search post_content for .webp and .avif references.
+        $rows = $wpdb->get_col(
+            "SELECT DISTINCT post_content FROM {$wpdb->posts}
+             WHERE post_content LIKE '%.webp%'
+             OR post_content LIKE '%.avif%'"
+        );
+        foreach ( $rows as $content ) {
+            if ( preg_match_all( '/([a-zA-Z0-9_\-]+)\.(jpe?g|png|gif|bmp|tiff?)\.(webp|avif)/i', $content, $m ) ) {
+                foreach ( $m[0] as $match ) {
+                    $webp_avif_refs[] = $match;
+                }
+            }
+            if ( preg_match_all( '/([a-zA-Z0-9_\-]+)\.(webp|avif)/i', $content, $m ) ) {
+                foreach ( $m[1] as $name ) {
+                    $webp_avif_refs[] = $name;
+                }
+            }
+        }
+
+        // Search postmeta for .webp and .avif references.
+        $rows = $wpdb->get_col(
+            "SELECT DISTINCT meta_value FROM {$wpdb->postmeta}
+             WHERE (meta_value LIKE '%.webp%' OR meta_value LIKE '%.avif%')
+             AND meta_key NOT LIKE '\_%imagify%'
+             AND meta_key != '_wp_attachment_metadata'"
+        );
+        foreach ( $rows as $val ) {
+            if ( preg_match_all( '/([a-zA-Z0-9_\-]+)\.(jpe?g|png|gif|bmp|tiff?)\.(webp|avif)/i', $val, $m ) ) {
+                foreach ( $m[0] as $match ) {
+                    $webp_avif_refs[] = $match;
+                }
+            }
+            if ( preg_match_all( '/([a-zA-Z0-9_\-]+)\.(webp|avif)/i', $val, $m ) ) {
+                foreach ( $m[1] as $name ) {
+                    $webp_avif_refs[] = $name;
+                }
+            }
+        }
+
+        // Search options for .webp and .avif references.
+        $rows = $wpdb->get_col(
+            "SELECT DISTINCT option_value FROM {$wpdb->options}
+             WHERE option_value LIKE '%.webp%'
+             OR option_value LIKE '%.avif%'"
+        );
+        foreach ( $rows as $val ) {
+            if ( preg_match_all( '/([a-zA-Z0-9_\-]+)\.(jpe?g|png|gif|bmp|tiff?)\.(webp|avif)/i', $val, $m ) ) {
+                foreach ( $m[0] as $match ) {
+                    $webp_avif_refs[] = $match;
+                }
+            }
+            if ( preg_match_all( '/([a-zA-Z0-9_\-]+)\.(webp|avif)/i', $val, $m ) ) {
+                foreach ( $m[1] as $name ) {
+                    $webp_avif_refs[] = $name;
+                }
+            }
+        }
+
+        if ( empty( $webp_avif_refs ) ) {
+            return $ids;
+        }
+
+        $webp_avif_refs = array_unique( $webp_avif_refs );
+
+        // Now check which unused attachments have filenames that match these refs.
+        // e.g. if "photo.jpg.webp" is in content, we want to protect attachment "photo.jpg".
+        $used_set = array_flip( array_unique( array_filter( array_map( 'absint', $used ) ) ) );
+
+        $all_meta = $wpdb->get_results(
+            "SELECT post_id, meta_value FROM {$wpdb->postmeta}
+             WHERE meta_key = '_wp_attached_file'"
+        );
+
+        foreach ( $all_meta as $row ) {
+            $post_id = (int) $row->post_id;
+
+            // Skip if already used.
+            if ( isset( $used_set[ $post_id ] ) ) {
+                continue;
+            }
+
+            $basename    = wp_basename( $row->meta_value );          // photo.jpg
+            $name_no_ext = pathinfo( $basename, PATHINFO_FILENAME ); // photo
+
+            foreach ( $webp_avif_refs as $ref ) {
+                // Match "photo.jpg.webp" contains "photo.jpg", or "photo" matches name.
+                if ( stripos( $ref, $basename ) !== false || strcasecmp( $ref, $name_no_ext ) === 0 ) {
+                    $ids[] = $post_id;
+                    break;
+                }
+            }
         }
 
         return $ids;
