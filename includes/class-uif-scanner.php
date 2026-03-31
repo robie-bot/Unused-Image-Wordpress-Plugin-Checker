@@ -848,55 +848,20 @@ class UIF_Scanner {
             $by_filename[ $basename ][] = (int) $att->ID;
         }
 
+        // ONLY search wp_posts.post_content — this is the critical table for
+        // catching cross-domain/staging URLs. The other tables (postmeta, options,
+        // termmeta) are already covered by the specific builder methods (ACF,
+        // Elementor, WooCommerce, Divi, WPBakery, Impreza, widgets, options).
+        // Searching those huge tables with LIKE causes timeouts on large sites.
         $filenames = array_keys( $by_filename );
-        $found_all = array();
-
-        // Search wp_posts.post_content.
         $found = self::batch_filename_search(
             $wpdb->posts,
             'post_content',
             $filenames,
             "post_type != 'attachment' AND post_status IN ('publish','draft','pending','private','future','inherit')"
         );
-        $found_all = array_merge( $found_all, $found );
 
-        // Only search remaining filenames in postmeta.
-        $remaining = array_diff( $filenames, $found_all );
-        if ( $remaining ) {
-            $found = self::batch_filename_search(
-                $wpdb->postmeta,
-                'meta_value',
-                array_values( $remaining ),
-                "meta_key NOT IN ('_wp_attached_file','_wp_attachment_metadata')"
-            );
-            $found_all = array_merge( $found_all, $found );
-        }
-
-        // Only search remaining in options.
-        $remaining = array_diff( $filenames, $found_all );
-        if ( $remaining ) {
-            $found = self::batch_filename_search(
-                $wpdb->options,
-                'option_value',
-                array_values( $remaining ),
-                "option_name NOT LIKE '_transient%' AND option_name NOT LIKE '_site_transient%'"
-            );
-            $found_all = array_merge( $found_all, $found );
-        }
-
-        // Only search remaining in termmeta.
-        $remaining = array_diff( $filenames, $found_all );
-        if ( $remaining ) {
-            $found = self::batch_filename_search(
-                $wpdb->termmeta,
-                'meta_value',
-                array_values( $remaining )
-            );
-            $found_all = array_merge( $found_all, $found );
-        }
-
-        // Map found filenames back to IDs.
-        foreach ( $found_all as $filename ) {
+        foreach ( $found as $filename ) {
             if ( isset( $by_filename[ $filename ] ) ) {
                 $ids = array_merge( $ids, $by_filename[ $filename ] );
             }
@@ -918,6 +883,7 @@ class UIF_Scanner {
 
         // 1. Imagify / optimizer meta: any image that has been optimized should
         //    be protected — the attachment IS the original backup.
+        //    These are fast indexed lookups on meta_key.
         $imagify_ids = $wpdb->get_col(
             "SELECT DISTINCT post_id FROM {$wpdb->postmeta}
              WHERE meta_key IN ('_imagify_data', '_imagify_status')
@@ -941,8 +907,8 @@ class UIF_Scanner {
         }
 
         // 3. Reverse lookup: if a .webp/.avif version of an image filename is
-        //    found in site content, mark the original as used.
-        //    Uses batched SQL — no giant memory blob needed.
+        //    found in post_content, mark the original as used.
+        //    Only searches post_content to avoid slow full-table scans on postmeta.
         $used_set = array_flip( array_unique( array_filter( array_map( 'absint', $used ) ) ) );
 
         $all_meta = $wpdb->get_results(
@@ -950,7 +916,6 @@ class UIF_Scanner {
              WHERE meta_key = '_wp_attached_file'"
         );
 
-        // Build variant filenames for images NOT already marked as used.
         $variant_map = array(); // variant_filename => post_id
         foreach ( $all_meta as $row ) {
             $post_id = (int) $row->post_id;
@@ -961,58 +926,25 @@ class UIF_Scanner {
             $basename    = wp_basename( $row->meta_value );
             $name_no_ext = pathinfo( $basename, PATHINFO_FILENAME );
 
-            $variants = array(
-                $basename . '.webp',
-                $basename . '.avif',
-                $name_no_ext . '.webp',
-                $name_no_ext . '.avif',
-            );
-
-            foreach ( $variants as $v ) {
-                $variant_map[ $v ] = $post_id;
-            }
+            $variant_map[ $basename . '.webp' ]  = $post_id;
+            $variant_map[ $basename . '.avif' ]  = $post_id;
+            $variant_map[ $name_no_ext . '.webp' ] = $post_id;
+            $variant_map[ $name_no_ext . '.avif' ] = $post_id;
         }
 
         if ( empty( $variant_map ) ) {
             return $ids;
         }
 
-        $variant_names = array_keys( $variant_map );
-        $found_all     = array();
-
-        // Search posts.
+        // Only search post_content — fast and sufficient.
         $found = self::batch_filename_search(
             $wpdb->posts,
             'post_content',
-            $variant_names,
+            array_keys( $variant_map ),
             "post_content != ''"
         );
-        $found_all = array_merge( $found_all, $found );
 
-        // Search postmeta.
-        $remaining = array_diff( $variant_names, $found_all );
-        if ( $remaining ) {
-            $found = self::batch_filename_search(
-                $wpdb->postmeta,
-                'meta_value',
-                array_values( $remaining )
-            );
-            $found_all = array_merge( $found_all, $found );
-        }
-
-        // Search options.
-        $remaining = array_diff( $variant_names, $found_all );
-        if ( $remaining ) {
-            $found = self::batch_filename_search(
-                $wpdb->options,
-                'option_value',
-                array_values( $remaining )
-            );
-            $found_all = array_merge( $found_all, $found );
-        }
-
-        // Map found variants back to original attachment IDs.
-        foreach ( $found_all as $variant ) {
+        foreach ( $found as $variant ) {
             if ( isset( $variant_map[ $variant ] ) ) {
                 $ids[] = $variant_map[ $variant ];
             }
