@@ -113,8 +113,10 @@ class UIF_Scanner {
              AND post_content != ''"
         );
 
-        $upload_dir = wp_get_upload_dir();
-        $base_url   = preg_quote( $upload_dir['baseurl'], '/' );
+        $upload_dir  = wp_get_upload_dir();
+        $base_url    = preg_quote( $upload_dir['baseurl'], '/' );
+        // Path-only pattern catches any domain (staging, CDN, old domain).
+        $upload_path = preg_quote( $upload_dir['subdir'] ? '/wp-content/uploads' : wp_parse_url( $upload_dir['baseurl'], PHP_URL_PATH ), '/' );
 
         foreach ( $contents as $content ) {
             // wp-image-{id} class used by the editor.
@@ -122,10 +124,21 @@ class UIF_Scanner {
                 $ids = array_merge( $ids, $m[1] );
             }
 
-            // Direct URL references to uploads.
+            // Direct URL references matching current site upload URL.
             if ( preg_match_all( '/' . $base_url . '\/[^\s"\'<>]+/i', $content, $m ) ) {
                 foreach ( $m[0] as $url ) {
                     $found = self::url_to_attachment_id( $url );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+
+            // Cross-domain: any https?:// URL pointing to /wp-content/uploads/ path.
+            // Catches staging URLs, CDN URLs, old domain references.
+            if ( preg_match_all( '/https?:\/\/[^\s"\'<>]*' . $upload_path . '\/[^\s"\'<>)]+/i', $content, $m ) ) {
+                foreach ( $m[0] as $url ) {
+                    $found = self::url_to_attachment_id_cross_domain( $url );
                     if ( $found ) {
                         $ids[] = $found;
                     }
@@ -730,7 +743,14 @@ class UIF_Scanner {
 
         // Regex matches both background:url() and background-image:url()
         // including shorthand like background: #fff url(...) no-repeat;
+        $upload_dir  = wp_get_upload_dir();
+        $upload_path = preg_quote( wp_parse_url( $upload_dir['baseurl'], PHP_URL_PATH ), '/' );
+
+        // Matches current-domain upload URLs.
         $bg_regex = '/background(?:-image)?\s*:[^;}]*url\(\s*["\']?(' . $base_url . '\/[^\s"\'<>)]+)["\']?\s*\)/i';
+
+        // Matches ANY domain's /wp-content/uploads/ path (staging, CDN, old domain).
+        $bg_regex_cross = '/background(?:-image)?\s*:[^;}]*url\(\s*["\']?(https?:\/\/[^\s"\'<>)]*' . $upload_path . '\/[^\s"\'<>)]+)["\']?\s*\)/i';
 
         // 1. All post content (catches inline styles in any builder/editor).
         $contents = $wpdb->get_col(
@@ -741,9 +761,19 @@ class UIF_Scanner {
         );
 
         foreach ( $contents as $content ) {
+            // Current-domain matches.
             if ( preg_match_all( $bg_regex, $content, $m ) ) {
                 foreach ( $m[1] as $url ) {
                     $found = self::url_to_attachment_id( $url );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+            // Cross-domain matches (staging/CDN/old domain).
+            if ( preg_match_all( $bg_regex_cross, $content, $m ) ) {
+                foreach ( $m[1] as $url ) {
+                    $found = self::url_to_attachment_id_cross_domain( $url );
                     if ( $found ) {
                         $ids[] = $found;
                     }
@@ -822,6 +852,52 @@ class UIF_Scanner {
 
         if ( ! $id ) {
             $id = attachment_url_to_postid( $url );
+        }
+
+        return $id ?: 0;
+    }
+
+    /**
+     * Convert a cross-domain URL (staging, CDN, old domain) to an attachment ID.
+     * Strips the foreign domain and replaces with the current site's upload URL,
+     * then looks up the attachment. This handles images created on staging that
+     * still reference the staging domain in post_content after migration.
+     */
+    private static function url_to_attachment_id_cross_domain( $url ) {
+        $upload_dir = wp_get_upload_dir();
+        $base_url   = $upload_dir['baseurl'];
+
+        // Extract the /wp-content/uploads/... path from the foreign URL.
+        $upload_base_path = wp_parse_url( $base_url, PHP_URL_PATH ); // e.g. /wp-content/uploads
+        $parsed           = wp_parse_url( $url );
+
+        if ( empty( $parsed['path'] ) ) {
+            return 0;
+        }
+
+        $path = $parsed['path'];
+
+        // Find where /wp-content/uploads starts in the foreign URL path.
+        $pos = strpos( $path, $upload_base_path );
+        if ( false === $pos ) {
+            // Try generic /wp-content/uploads fallback.
+            $pos = strpos( $path, '/wp-content/uploads' );
+            if ( false === $pos ) {
+                return 0;
+            }
+            $relative = substr( $path, $pos + strlen( '/wp-content/uploads' ) );
+            $local_url = $base_url . $relative;
+        } else {
+            $relative  = substr( $path, $pos + strlen( $upload_base_path ) );
+            $local_url = $base_url . $relative;
+        }
+
+        // Strip thumbnail suffix before lookup.
+        $clean = preg_replace( '/-\d+x\d+(?=\.\w+$)/', '', $local_url );
+        $id    = attachment_url_to_postid( $clean );
+
+        if ( ! $id ) {
+            $id = attachment_url_to_postid( $local_url );
         }
 
         return $id ?: 0;
