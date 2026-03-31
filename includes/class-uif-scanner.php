@@ -44,6 +44,10 @@ class UIF_Scanner {
         // This catches ANY reference regardless of domain, builder, or storage format.
         $used = array_merge( $used, self::get_filename_referenced_ids() );
 
+        // Imagify / WebP / AVIF: if an optimized version is used, mark the original as used too.
+        // Also protect Imagify backup originals from deletion.
+        $used = array_merge( $used, self::get_imagify_protected_ids( $used ) );
+
         $used = apply_filters( 'uif_used_image_ids', $used );
 
         return array_unique( array_filter( array_map( 'absint', $used ) ) );
@@ -882,6 +886,137 @@ class UIF_Scanner {
             if ( $found > 0 ) {
                 $ids = array_merge( $ids, $by_filename[ $filename ] );
             }
+        }
+
+        return $ids;
+    }
+
+    /**
+     * Imagify awareness: protect original images when their WebP/AVIF versions are in use,
+     * and protect Imagify backup originals from being flagged as unused.
+     *
+     * @param array $used Already-identified used image IDs.
+     * @return array Additional IDs that should be marked as used.
+     */
+    private static function get_imagify_protected_ids( $used ) {
+        global $wpdb;
+        $ids = array();
+
+        if ( empty( $used ) ) {
+            return $ids;
+        }
+
+        $used_set = array_unique( array_filter( array_map( 'absint', $used ) ) );
+
+        // 1. For every image in the library, if a WebP/AVIF sibling file exists
+        //    AND the original's filename was found in $used (via filename search),
+        //    we already have it. But we also need the reverse: if the WebP/AVIF
+        //    version is referenced in content but the original attachment is not
+        //    yet in $used, mark the original as used.
+        //
+        // Strategy: query ALL image attachments, check if a .webp/.avif variant
+        // of their filename appears in post content / postmeta / options.
+
+        $all_images = $wpdb->get_results(
+            "SELECT ID, guid FROM {$wpdb->posts}
+             WHERE post_type = 'attachment'
+             AND post_mime_type LIKE 'image/%'
+             AND post_status = 'inherit'"
+        );
+
+        foreach ( $all_images as $img ) {
+            $img_id = (int) $img->ID;
+
+            // Skip if already marked as used.
+            if ( in_array( $img_id, $used_set, true ) ) {
+                continue;
+            }
+
+            $file = get_attached_file( $img_id );
+            if ( ! $file || ! file_exists( $file ) ) {
+                continue;
+            }
+
+            $basename = wp_basename( $file );                // e.g. photo.jpg
+            $name_no_ext = pathinfo( $basename, PATHINFO_FILENAME ); // e.g. photo
+
+            // Build possible WebP / AVIF filenames that Imagify (or others) create.
+            $variants = array(
+                $basename . '.webp',          // photo.jpg.webp  (Imagify default)
+                $basename . '.avif',          // photo.jpg.avif
+                $name_no_ext . '.webp',       // photo.webp
+                $name_no_ext . '.avif',       // photo.avif
+            );
+
+            // Check if any variant filename is referenced in content.
+            foreach ( $variants as $variant ) {
+                $esc = '%' . $wpdb->esc_like( $variant ) . '%';
+
+                // Search post_content.
+                $found = $wpdb->get_var( $wpdb->prepare(
+                    "SELECT 1 FROM {$wpdb->posts}
+                     WHERE post_content LIKE %s
+                     LIMIT 1",
+                    $esc
+                ) );
+
+                if ( ! $found ) {
+                    // Search postmeta values.
+                    $found = $wpdb->get_var( $wpdb->prepare(
+                        "SELECT 1 FROM {$wpdb->postmeta}
+                         WHERE meta_value LIKE %s
+                         LIMIT 1",
+                        $esc
+                    ) );
+                }
+
+                if ( ! $found ) {
+                    // Search options.
+                    $found = $wpdb->get_var( $wpdb->prepare(
+                        "SELECT 1 FROM {$wpdb->options}
+                         WHERE option_value LIKE %s
+                         LIMIT 1",
+                        $esc
+                    ) );
+                }
+
+                if ( $found ) {
+                    $ids[] = $img_id;
+                    break; // One match is enough.
+                }
+            }
+        }
+
+        // 2. Imagify stores optimization data in postmeta key '_imagify_data'.
+        //    Any attachment with Imagify data has a backup original that should
+        //    not be deleted — the original is the attachment itself.
+        //    Also check '_imagify_status' for any optimized image.
+        $imagify_ids = $wpdb->get_col(
+            "SELECT DISTINCT post_id FROM {$wpdb->postmeta}
+             WHERE meta_key IN ('_imagify_data', '_imagify_status')
+             AND meta_value != ''
+             AND meta_value != 'a:0:{}'"
+        );
+
+        if ( $imagify_ids ) {
+            $ids = array_merge( $ids, $imagify_ids );
+        }
+
+        // 3. ShortPixel, EWWW, and other optimizers store similar meta.
+        //    Catch the most common ones.
+        $optimizer_keys = array(
+            '_wp_attachment_backup_sizes',  // WP core backup sizes (used by many optimizers)
+        );
+        $placeholders = implode( ',', array_fill( 0, count( $optimizer_keys ), '%s' ) );
+        $backup_ids = $wpdb->get_col( $wpdb->prepare(
+            "SELECT DISTINCT post_id FROM {$wpdb->postmeta}
+             WHERE meta_key IN ($placeholders)
+             AND meta_value != ''",
+            ...$optimizer_keys
+        ) );
+
+        if ( $backup_ids ) {
+            $ids = array_merge( $ids, $backup_ids );
         }
 
         return $ids;
