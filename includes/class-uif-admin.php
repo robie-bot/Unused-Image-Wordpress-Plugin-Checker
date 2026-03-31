@@ -71,9 +71,20 @@ class UIF_Admin {
 
             <div class="uif-intro">
                 <p><?php esc_html_e( 'Scan your media library to find images that are not used in any posts, pages, widgets, WooCommerce products, or theme settings.', 'unused-image-finder' ); ?></p>
-                <button id="uif-scan-btn" class="button button-primary button-hero">
-                    <?php esc_html_e( 'Scan for Unused Images', 'unused-image-finder' ); ?>
-                </button>
+                <div class="uif-controls">
+                    <button id="uif-scan-btn" class="button button-primary button-hero">
+                        <?php esc_html_e( 'Scan for Unused Images', 'unused-image-finder' ); ?>
+                    </button>
+                    <label class="uif-dry-run-toggle">
+                        <input type="checkbox" id="uif-dry-run" checked />
+                        <strong><?php esc_html_e( 'Safe Mode (Dry Run)', 'unused-image-finder' ); ?></strong>
+                        <span class="uif-dry-run-desc"><?php esc_html_e( '— Disables all delete buttons. Uncheck to enable deletion.', 'unused-image-finder' ); ?></span>
+                    </label>
+                </div>
+            </div>
+
+            <div id="uif-dry-run-banner" class="notice notice-info uif-dry-run-banner">
+                <p><strong><?php esc_html_e( 'Safe Mode is ON', 'unused-image-finder' ); ?></strong> — <?php esc_html_e( 'Deletion is disabled. You can scan and export CSV only. Uncheck "Safe Mode" above to enable deletion.', 'unused-image-finder' ); ?></p>
             </div>
 
             <div id="uif-progress" class="uif-progress" style="display:none;">

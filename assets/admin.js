@@ -26,6 +26,44 @@
     var perPage        = uif.per_page || 50;
     var selectedIds    = {};          // { id: true } across ALL pages
     var allPagesSelected = false;     // "Select All Pages" flag
+    var isDryRun       = $('#uif-dry-run').is(':checked');
+
+    // ── Dry Run (Safe Mode) ────────────────────────────────────
+
+    function applyDryRunState() {
+        isDryRun = $('#uif-dry-run').is(':checked');
+
+        if (isDryRun) {
+            $('#uif-dry-run-banner').show();
+            deleteBtn.prop('disabled', true).addClass('uif-disabled-dry-run');
+            tbody.find('.uif-delete-single').addClass('uif-disabled-dry-run');
+            $('#uif-select-all, #uif-select-all-top, #uif-select-all-pages').prop('disabled', true);
+            tbody.find('.uif-cb').prop('disabled', true);
+        } else {
+            $('#uif-dry-run-banner').hide();
+            deleteBtn.removeClass('uif-disabled-dry-run');
+            tbody.find('.uif-delete-single').removeClass('uif-disabled-dry-run');
+            $('#uif-select-all, #uif-select-all-top, #uif-select-all-pages').prop('disabled', false);
+            tbody.find('.uif-cb').prop('disabled', false);
+            updateSelectedUI();
+        }
+    }
+
+    $(document).on('change', '#uif-dry-run', function () {
+        if (!$(this).is(':checked')) {
+            if (!confirm('Are you sure you want to disable Safe Mode? This will allow permanent deletion of images.')) {
+                $(this).prop('checked', true);
+                return;
+            }
+        }
+        // Clear selections when toggling.
+        selectedIds = {};
+        allPagesSelected = false;
+        applyDryRunState();
+    });
+
+    // Initial state.
+    applyDryRunState();
 
     // ── Helpers ────────────────────────────────────────────────
 
@@ -104,6 +142,7 @@
         tbody.html(html);
         renderPagination();
         updateSelectedUI();
+        applyDryRunState();
 
         // Scroll to top of table.
         if (tableWrap.length) {
@@ -412,6 +451,11 @@
     // ── Bulk delete ────────────────────────────────────────────
 
     deleteBtn.on('click', function () {
+        if (isDryRun) {
+            showNotice('Safe Mode is ON. Disable it to delete images.', 'warning');
+            return;
+        }
+
         var ids = [];
         for (var k in selectedIds) {
             if (selectedIds.hasOwnProperty(k) && selectedIds[k]) {
@@ -518,6 +562,12 @@
 
     $(document).on('click', '.uif-delete-single', function (e) {
         e.preventDefault();
+
+        if (isDryRun) {
+            showNotice('Safe Mode is ON. Disable it to delete images.', 'warning');
+            return;
+        }
+
         var id  = $(this).data('id');
         var row = tbody.find('tr[data-id="' + id + '"]');
 

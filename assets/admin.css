@@ -174,6 +174,46 @@
     pointer-events: none;
 }
 
+/* Dry Run / Safe Mode */
+.uif-controls {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.uif-dry-run-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.uif-dry-run-toggle input[type="checkbox"] {
+    margin: 0;
+}
+
+.uif-dry-run-desc {
+    color: #646970;
+    font-weight: normal;
+}
+
+.uif-dry-run-banner {
+    border-left-color: #2271b1;
+    margin: 12px 0;
+}
+
+.uif-dry-run-banner p {
+    margin: 8px 0;
+}
+
+.uif-disabled-dry-run {
+    opacity: 0.4 !important;
+    pointer-events: none !important;
+    cursor: not-allowed !important;
+}
+
 /* Pagination */
 .uif-pagination {
     margin: 8px 0;
