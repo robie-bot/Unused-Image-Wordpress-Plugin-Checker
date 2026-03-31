@@ -623,8 +623,11 @@ class UIF_Scanner {
         $upload_dir = wp_get_upload_dir();
         $base_url   = preg_quote( $upload_dir['baseurl'], '/' );
 
+        $upload_base_path = wp_parse_url( $upload_dir['baseurl'], PHP_URL_PATH );
+        $upload_path_re   = preg_quote( $upload_base_path, '/' );
+
         // Helper: extract image IDs and URLs from any content string.
-        $extract = function ( $content ) use ( &$ids, $base_url ) {
+        $extract = function ( $content ) use ( &$ids, $base_url, $upload_path_re ) {
             // Numeric image/images attributes on [us_*] shortcodes.
             if ( preg_match_all( '/\[us_\w+[^\]]*\s(?:image|images|img|logo|photo|icon|media|thumbnail|ids|include)=["\']?([\d,]+)["\']?/', $content, $m ) ) {
                 foreach ( $m[1] as $id_string ) {
@@ -646,7 +649,7 @@ class UIF_Scanner {
                 }
             }
 
-            // Any upload URLs in the content.
+            // Any upload URLs in the content (current domain).
             if ( preg_match_all( '/' . $base_url . '\/[^\s"\'<>\]\[)]+/i', $content, $m ) ) {
                 foreach ( $m[0] as $url ) {
                     $found = self::url_to_attachment_id( $url );
@@ -656,8 +659,26 @@ class UIF_Scanner {
                 }
             }
 
-            // JSON-style "id":123 or "id":"123" (used in Gutenberg/builder data).
-            if ( preg_match_all( '/"id"\s*:\s*"?(\d+)"?/', $content, $m ) ) {
+            // Cross-domain upload URLs (staging, CDN, old domain).
+            if ( preg_match_all( '/https?:\/\/[^\s"\'<>\]\[)]*' . $upload_path_re . '\/[^\s"\'<>\]\[)]+/i', $content, $m ) ) {
+                foreach ( $m[0] as $url ) {
+                    $found = self::url_to_attachment_id_cross_domain( $url );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+
+            // JSON-style: any key containing "image", "img", "id", "logo", "photo",
+            // "thumbnail", "media", "icon", "avatar", "background" with a numeric value.
+            // Catches: "id":123, "image":"456", "us_image_id":"789", etc.
+            if ( preg_match_all( '/"[^"]*(?:id|image|img|logo|photo|thumbnail|media|icon|avatar|background)[^"]*"\s*:\s*"?(\d+)"?/i', $content, $m ) ) {
+                $ids = array_merge( $ids, $m[1] );
+            }
+
+            // Catch bare numeric values in common Impreza grid layout patterns.
+            // e.g., "source":"custom","custom":"1234" or "value":"5678"
+            if ( preg_match_all( '/"(?:custom|value|source_\d+_value|selected)"\s*:\s*"(\d+)"/i', $content, $m ) ) {
                 $ids = array_merge( $ids, $m[1] );
             }
         };
@@ -814,24 +835,6 @@ class UIF_Scanner {
         return $ids;
     }
 
-    /**
-     * Filename-based search across the ENTIRE database.
-     *
-     * Builds a lookup map of filename => attachment ID from _wp_attached_file,
-     * then searches wp_posts, wp_postmeta, wp_options, and wp_termmeta for
-     * any occurrence of each filename. This is domain-agnostic — it doesn't
-     * matter if the URL uses staging, CDN, or production domain.
-     */
-    /**
-     * Helper: search a DB table column for ANY of the given filenames using
-     * batched OR queries (50 filenames per query). Returns the filenames found.
-     *
-     * @param string $table     Full table name.
-     * @param string $column    Column to search.
-     * @param array  $filenames List of filenames to look for.
-     * @param string $where     Extra WHERE clause (optional).
-     * @return array Filenames that were found in the column.
-     */
     /**
      * Search post_content for filenames by loading posts in small chunks
      * and using PHP stripos(). Zero LIKE queries — uses only indexed
