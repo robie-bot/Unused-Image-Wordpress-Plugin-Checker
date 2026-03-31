@@ -184,7 +184,7 @@ class UIF_Scanner {
 
         $ids = array();
 
-        // Product gallery images.
+        // Product gallery images (_product_image_gallery stores comma-separated IDs).
         $galleries = $wpdb->get_col(
             "SELECT meta_value FROM {$wpdb->postmeta}
              WHERE meta_key = '_product_image_gallery'
@@ -194,6 +194,41 @@ class UIF_Scanner {
         foreach ( $galleries as $gallery ) {
             $ids = array_merge( $ids, explode( ',', $gallery ) );
         }
+
+        // WooCommerce placeholder image (shown when a product has no image).
+        // Stored as an attachment ID in the woocommerce_placeholder_image option.
+        $placeholder_id = get_option( 'woocommerce_placeholder_image', 0 );
+        if ( $placeholder_id ) {
+            $ids[] = absint( $placeholder_id );
+        } else {
+            // Fallback: find the placeholder by its known filename in the uploads root.
+            $upload_dir      = wp_get_upload_dir();
+            $placeholder_url = $upload_dir['baseurl'] . '/woocommerce-placeholder.png';
+            $found           = attachment_url_to_postid( $placeholder_url );
+            if ( $found ) {
+                $ids[] = $found;
+            }
+        }
+
+        // Product featured images (_thumbnail_id is already caught globally,
+        // but also catch any variation images stored in product variation meta).
+        $variation_images = $wpdb->get_col(
+            "SELECT DISTINCT pm.meta_value
+             FROM {$wpdb->postmeta} pm
+             INNER JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+             WHERE p.post_type = 'product_variation'
+             AND pm.meta_key = '_thumbnail_id'
+             AND pm.meta_value > 0"
+        );
+        $ids = array_merge( $ids, $variation_images );
+
+        // WooCommerce category thumbnail images (stored in term meta).
+        $cat_images = $wpdb->get_col(
+            "SELECT meta_value FROM {$wpdb->termmeta}
+             WHERE meta_key = 'thumbnail_id'
+             AND meta_value > 0"
+        );
+        $ids = array_merge( $ids, $cat_images );
 
         return $ids;
     }
