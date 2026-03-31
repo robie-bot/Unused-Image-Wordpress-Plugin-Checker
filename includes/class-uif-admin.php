@@ -10,6 +10,8 @@ class UIF_Admin {
         add_action( 'admin_menu', array( __CLASS__, 'add_menu' ) );
         add_action( 'admin_enqueue_scripts', array( __CLASS__, 'enqueue_assets' ) );
         add_action( 'wp_ajax_uif_scan_init', array( __CLASS__, 'ajax_scan_init' ) );
+        add_action( 'wp_ajax_uif_scan_phase', array( __CLASS__, 'ajax_scan_phase' ) );
+        add_action( 'wp_ajax_uif_scan_finalize', array( __CLASS__, 'ajax_scan_finalize' ) );
         add_action( 'wp_ajax_uif_scan_batch', array( __CLASS__, 'ajax_scan_batch' ) );
         add_action( 'wp_ajax_uif_delete', array( __CLASS__, 'ajax_delete' ) );
         add_action( 'admin_init', array( __CLASS__, 'handle_csv_export' ) );
@@ -169,8 +171,8 @@ class UIF_Admin {
     }
 
     /**
-     * Step 1: Identify all unused image IDs (heavy lifting).
-     * Stores IDs in a transient so batch requests can pull from it.
+     * Step 1: Get all image IDs and return phase info.
+     * Lightweight — just counts images and tells JS how many phases to run.
      */
     public static function ajax_scan_init() {
         check_ajax_referer( 'uif_nonce', 'nonce' );
@@ -179,20 +181,101 @@ class UIF_Admin {
             wp_send_json_error( 'Unauthorized' );
         }
 
-        // Increase limits for the detection phase.
-        @set_time_limit( 300 );
+        @set_time_limit( 120 );
         wp_raise_memory_limit( 'admin' );
 
-        $all_ids  = UIF_Scanner::get_all_image_ids();
-        $used_ids = UIF_Scanner::get_used_image_ids();
-        $unused   = array_values( array_diff( $all_ids, $used_ids ) );
+        $all_ids = UIF_Scanner::get_all_image_ids();
+        $phases  = UIF_Scanner::get_scan_phases();
 
-        // Store unused IDs in a transient (valid 1 hour).
-        set_transient( 'uif_unused_ids_' . get_current_user_id(), $unused, HOUR_IN_SECONDS );
+        // Store all IDs for later.
+        $uid = get_current_user_id();
+        set_transient( 'uif_all_ids_' . $uid, $all_ids, HOUR_IN_SECONDS );
+        // Reset used IDs accumulator.
+        set_transient( 'uif_used_ids_' . $uid, array(), HOUR_IN_SECONDS );
+
+        $phase_labels = array();
+        foreach ( $phases as $p ) {
+            $phase_labels[] = $p['label'];
+        }
 
         wp_send_json_success( array(
             'total_images' => count( $all_ids ),
-            'used_count'   => count( $used_ids ),
+            'total_phases' => count( $phases ),
+            'phase_labels' => $phase_labels,
+        ) );
+    }
+
+    /**
+     * Step 2: Run a single detection phase.
+     * Called repeatedly by JS for each phase index.
+     */
+    public static function ajax_scan_phase() {
+        check_ajax_referer( 'uif_nonce', 'nonce' );
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Unauthorized' );
+        }
+
+        @set_time_limit( 120 );
+        wp_raise_memory_limit( 'admin' );
+
+        $phase_index = isset( $_POST['phase'] ) ? absint( $_POST['phase'] ) : 0;
+        $uid         = get_current_user_id();
+
+        $used_so_far = get_transient( 'uif_used_ids_' . $uid );
+        if ( false === $used_so_far ) {
+            $used_so_far = array();
+        }
+
+        $found = UIF_Scanner::run_scan_phase( $phase_index, $used_so_far );
+
+        // Accumulate used IDs.
+        $used_so_far = array_unique( array_merge( $used_so_far, $found ) );
+        set_transient( 'uif_used_ids_' . $uid, $used_so_far, HOUR_IN_SECONDS );
+
+        wp_send_json_success( array(
+            'phase'      => $phase_index,
+            'found'      => count( $found ),
+            'total_used' => count( $used_so_far ),
+        ) );
+    }
+
+    /**
+     * Step 3: Finalize — compute unused IDs from all_ids - used_ids.
+     */
+    public static function ajax_scan_finalize() {
+        check_ajax_referer( 'uif_nonce', 'nonce' );
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Unauthorized' );
+        }
+
+        $uid     = get_current_user_id();
+        $all_ids = get_transient( 'uif_all_ids_' . $uid );
+        $used    = get_transient( 'uif_used_ids_' . $uid );
+
+        if ( false === $all_ids ) {
+            wp_send_json_error( 'Scan expired. Please run the scan again.' );
+        }
+
+        if ( false === $used ) {
+            $used = array();
+        }
+
+        $used    = apply_filters( 'uif_used_image_ids', $used );
+        $used    = array_unique( array_filter( array_map( 'absint', $used ) ) );
+        $unused  = array_values( array_diff( $all_ids, $used ) );
+
+        // Store for batch loading + CSV export.
+        set_transient( 'uif_unused_ids_' . $uid, $unused, HOUR_IN_SECONDS );
+
+        // Clean up temp transients.
+        delete_transient( 'uif_all_ids_' . $uid );
+        delete_transient( 'uif_used_ids_' . $uid );
+
+        wp_send_json_success( array(
+            'total_images' => count( $all_ids ),
+            'used_count'   => count( $used ),
             'unused_count' => count( $unused ),
         ) );
     }

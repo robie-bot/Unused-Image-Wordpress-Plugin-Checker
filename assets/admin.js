@@ -278,10 +278,90 @@
             unused_count: 0, unused_images: [], total_size: 0
         };
 
-        setProgress(0, uif.i18n.scanning, 'Identifying used images across your site...');
+        setProgress(0, uif.i18n.scanning, 'Preparing scan...');
 
+        // Step 1: Init — get image count and phase info.
         $.post(uif.ajax_url, {
             action: 'uif_scan_init',
+            nonce:  uif.nonce
+        })
+        .done(function (res) {
+            if (!res.success) {
+                showNotice(res.data || uif.i18n.error, 'error');
+                scanDone();
+                return;
+            }
+
+            scanData.total_images = res.data.total_images;
+            var totalPhases = res.data.total_phases;
+            var phaseLabels = res.data.phase_labels;
+
+            setProgress(5, 'Scanning...', 'Phase 1 of ' + totalPhases + ': ' + phaseLabels[0]);
+
+            // Step 2: Run each phase sequentially.
+            runPhase(0, totalPhases, phaseLabels);
+        })
+        .fail(function () {
+            showNotice(uif.i18n.error, 'error');
+            scanDone();
+        });
+    }
+
+    function runPhase(phaseIndex, totalPhases, phaseLabels, retries) {
+        if (typeof retries === 'undefined') retries = 0;
+        var maxRetries = 3;
+
+        if (phaseIndex >= totalPhases) {
+            // All phases done — finalize.
+            finalizeScan();
+            return;
+        }
+
+        var phasePct = 5 + Math.round(((phaseIndex + 1) / totalPhases) * 55); // 5-60% for phases
+
+        $.post(uif.ajax_url, {
+            action: 'uif_scan_phase',
+            nonce:  uif.nonce,
+            phase:  phaseIndex
+        })
+        .done(function (res) {
+            if (!res.success) {
+                if (retries < maxRetries) {
+                    setProgress(null, null, 'Phase ' + (phaseIndex + 1) + ' failed, retrying... (' + (retries + 1) + '/' + maxRetries + ')');
+                    setTimeout(function () { runPhase(phaseIndex, totalPhases, phaseLabels, retries + 1); }, 2000);
+                    return;
+                }
+                showNotice('Phase ' + (phaseIndex + 1) + ' failed after retries: ' + (res.data || uif.i18n.error), 'error');
+                scanDone();
+                return;
+            }
+
+            var nextPhase = phaseIndex + 1;
+            var detail = 'Phase ' + (phaseIndex + 1) + ' of ' + totalPhases + ' complete — ' + res.data.total_used + ' used images found so far';
+            setProgress(phasePct, 'Scanning...', detail);
+
+            if (nextPhase < totalPhases) {
+                setProgress(null, null, 'Phase ' + (nextPhase + 1) + ' of ' + totalPhases + ': ' + phaseLabels[nextPhase]);
+            }
+
+            runPhase(nextPhase, totalPhases, phaseLabels, 0);
+        })
+        .fail(function (jqXHR, textStatus) {
+            if (retries < maxRetries) {
+                setProgress(null, null, 'Phase ' + (phaseIndex + 1) + ' failed (' + textStatus + '), retrying in 3s... (' + (retries + 1) + '/' + maxRetries + ')');
+                setTimeout(function () { runPhase(phaseIndex, totalPhases, phaseLabels, retries + 1); }, 3000);
+                return;
+            }
+            showNotice('Scan failed at phase ' + (phaseIndex + 1) + ' after ' + maxRetries + ' retries.', 'error');
+            scanDone();
+        });
+    }
+
+    function finalizeScan() {
+        setProgress(60, 'Finalizing scan...', 'Computing unused images...');
+
+        $.post(uif.ajax_url, {
+            action: 'uif_scan_finalize',
             nonce:  uif.nonce
         })
         .done(function (res) {
@@ -300,7 +380,7 @@
                 return;
             }
 
-            setProgress(10, 'Scan complete. Loading image details...', '0 of ' + res.data.unused_count + ' images loaded');
+            setProgress(65, 'Loading image details...', '0 of ' + res.data.unused_count + ' images loaded');
             fetchBatch(0, res.data.unused_count);
         })
         .fail(function () {
@@ -341,7 +421,7 @@
             }
 
             var loaded = scanData.unused_images.length;
-            var pct    = 10 + Math.round((loaded / total) * 90);
+            var pct    = 65 + Math.round((loaded / total) * 35);
             var detail = loaded + ' of ' + total + ' images loaded (' + formatSize(scanData.total_size) + ' recoverable)';
 
             setProgress(pct, uif.i18n.building.replace('%d', loaded).replace('%d', total), detail);

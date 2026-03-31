@@ -25,32 +25,80 @@ class UIF_Scanner {
      */
     public static function get_used_image_ids() {
         $used = array();
-
-        $used = array_merge( $used, self::get_featured_image_ids() );
-        $used = array_merge( $used, self::get_content_image_ids() );
-        $used = array_merge( $used, self::get_content_gallery_ids() );
-        $used = array_merge( $used, self::get_woocommerce_image_ids() );
-        $used = array_merge( $used, self::get_option_image_ids() );
-        $used = array_merge( $used, self::get_widget_image_ids() );
-        $used = array_merge( $used, self::get_acf_image_ids() );
-        $used = array_merge( $used, self::get_elementor_image_ids() );
-        $used = array_merge( $used, self::get_divi_image_ids() );
-        $used = array_merge( $used, self::get_wpbakery_image_ids() );
-        $used = array_merge( $used, self::get_impreza_image_ids() );
-        $used = array_merge( $used, self::get_site_icon_ids() );
-        $used = array_merge( $used, self::get_css_background_image_ids() );
-
-        // Nuclear option: search entire database for each image filename.
-        // This catches ANY reference regardless of domain, builder, or storage format.
-        $used = array_merge( $used, self::get_filename_referenced_ids() );
-
-        // Imagify / WebP / AVIF: if an optimized version is used, mark the original as used too.
-        // Also protect Imagify backup originals from deletion.
-        $used = array_merge( $used, self::get_imagify_protected_ids( $used ) );
-
+        $phases = self::get_scan_phases();
+        foreach ( $phases as $phase ) {
+            foreach ( $phase['methods'] as $method ) {
+                if ( $method === 'get_imagify_protected_ids' ) {
+                    $used = array_merge( $used, self::$method( $used ) );
+                } else {
+                    $used = array_merge( $used, self::$method() );
+                }
+            }
+        }
         $used = apply_filters( 'uif_used_image_ids', $used );
-
         return array_unique( array_filter( array_map( 'absint', $used ) ) );
+    }
+
+    /**
+     * Scan phases — each phase is a group of methods that can run in one
+     * AJAX request without timing out.
+     */
+    public static function get_scan_phases() {
+        return array(
+            array(
+                'label'   => 'Core content (featured images, galleries)',
+                'methods' => array( 'get_featured_image_ids', 'get_content_image_ids', 'get_content_gallery_ids' ),
+            ),
+            array(
+                'label'   => 'WooCommerce, widgets, options, site icons',
+                'methods' => array( 'get_woocommerce_image_ids', 'get_option_image_ids', 'get_widget_image_ids', 'get_site_icon_ids' ),
+            ),
+            array(
+                'label'   => 'ACF & Elementor',
+                'methods' => array( 'get_acf_image_ids', 'get_elementor_image_ids' ),
+            ),
+            array(
+                'label'   => 'Divi, WPBakery & Impreza',
+                'methods' => array( 'get_divi_image_ids', 'get_wpbakery_image_ids', 'get_impreza_image_ids' ),
+            ),
+            array(
+                'label'   => 'CSS backgrounds',
+                'methods' => array( 'get_css_background_image_ids' ),
+            ),
+            array(
+                'label'   => 'Filename search (cross-domain)',
+                'methods' => array( 'get_filename_referenced_ids' ),
+            ),
+            array(
+                'label'   => 'Imagify / WebP / AVIF protection',
+                'methods' => array( 'get_imagify_protected_ids' ),
+            ),
+        );
+    }
+
+    /**
+     * Run a single scan phase and return found used IDs.
+     *
+     * @param int   $phase_index Zero-based phase index.
+     * @param array $used_so_far IDs already found in previous phases (needed by Imagify method).
+     * @return array Used image IDs found in this phase.
+     */
+    public static function run_scan_phase( $phase_index, $used_so_far = array() ) {
+        $phases = self::get_scan_phases();
+        if ( ! isset( $phases[ $phase_index ] ) ) {
+            return array();
+        }
+
+        $ids = array();
+        foreach ( $phases[ $phase_index ]['methods'] as $method ) {
+            if ( $method === 'get_imagify_protected_ids' ) {
+                $ids = array_merge( $ids, self::$method( $used_so_far ) );
+            } else {
+                $ids = array_merge( $ids, self::$method() );
+            }
+        }
+
+        return array_unique( array_filter( array_map( 'absint', $ids ) ) );
     }
 
     /**
