@@ -774,12 +774,89 @@ class UIF_Scanner {
      * any occurrence of each filename. This is domain-agnostic — it doesn't
      * matter if the URL uses staging, CDN, or production domain.
      */
-    private static function get_filename_referenced_ids() {
+    /**
+     * Bulk content blob loader. Pulls all searchable content from the database
+     * into a SINGLE string so we can do fast PHP strpos() lookups instead of
+     * thousands of SQL LIKE queries.
+     *
+     * Called once, result is cached in a static variable.
+     *
+     * @return string Giant concatenated blob of all site content.
+     */
+    private static function get_content_blob() {
+        static $blob = null;
+        if ( $blob !== null ) {
+            return $blob;
+        }
+
         global $wpdb;
+        $parts = array();
+
+        // Post content (pages, posts, CPTs — NOT attachments themselves).
+        $rows = $wpdb->get_col(
+            "SELECT post_content FROM {$wpdb->posts}
+             WHERE post_type != 'attachment'
+             AND post_status IN ('publish','draft','pending','private','future','inherit')
+             AND post_content != ''"
+        );
+        if ( $rows ) {
+            $parts[] = implode( "\n", $rows );
+        }
+        unset( $rows );
+
+        // Postmeta values (skip attachment metadata & attached file — those are about the image itself).
+        $rows = $wpdb->get_col(
+            "SELECT meta_value FROM {$wpdb->postmeta}
+             WHERE meta_key NOT IN ('_wp_attached_file','_wp_attachment_metadata')
+             AND meta_value != ''
+             AND CHAR_LENGTH(meta_value) > 5"
+        );
+        if ( $rows ) {
+            $parts[] = implode( "\n", $rows );
+        }
+        unset( $rows );
+
+        // Options (theme mods, widget data, customizer, etc.)
+        $rows = $wpdb->get_col(
+            "SELECT option_value FROM {$wpdb->options}
+             WHERE option_value != ''
+             AND CHAR_LENGTH(option_value) > 5
+             AND option_name NOT LIKE '_transient%'
+             AND option_name NOT LIKE '_site_transient%'"
+        );
+        if ( $rows ) {
+            $parts[] = implode( "\n", $rows );
+        }
+        unset( $rows );
+
+        // Term meta.
+        $rows = $wpdb->get_col(
+            "SELECT meta_value FROM {$wpdb->termmeta}
+             WHERE meta_value != ''
+             AND CHAR_LENGTH(meta_value) > 5"
+        );
+        if ( $rows ) {
+            $parts[] = implode( "\n", $rows );
+        }
+        unset( $rows );
+
+        $blob = implode( "\n", $parts );
+        unset( $parts );
+
+        return $blob;
+    }
+
+    private static function get_filename_referenced_ids() {
         $ids = array();
 
-        // 1. Build filename => ID lookup from _wp_attached_file meta.
-        // The meta stores relative paths like "2025/09/22Website-Banner-Images.png".
+        $blob = self::get_content_blob();
+        if ( empty( $blob ) ) {
+            return $ids;
+        }
+
+        global $wpdb;
+
+        // Build filename => ID lookup from _wp_attached_file meta.
         $attachments = $wpdb->get_results(
             "SELECT p.ID, pm.meta_value AS filepath
              FROM {$wpdb->posts} p
@@ -793,98 +870,11 @@ class UIF_Scanner {
             return $ids;
         }
 
-        // Build lookup: basename => [ {id, filepath}, ... ]
-        // and filepath => id
-        $by_filename = array();
-        $by_filepath = array();
-
+        // Simple PHP strpos() against the blob — no SQL queries in the loop.
         foreach ( $attachments as $att ) {
             $basename = basename( $att->filepath );
-            $by_filename[ $basename ][] = $att->ID;
-            $by_filepath[ $att->filepath ] = $att->ID;
-        }
-
-        // 2. Search each table for filename occurrences.
-        //    Use SQL LIKE for each unique filename. Process in batches to avoid
-        //    huge queries.
-
-        $filenames = array_keys( $by_filename );
-
-        // Search wp_posts.post_content — most images are referenced here.
-        foreach ( $filenames as $filename ) {
-            $escaped = $wpdb->esc_like( $filename );
-            $found = $wpdb->get_var(
-                $wpdb->prepare(
-                    "SELECT COUNT(*) FROM {$wpdb->posts}
-                     WHERE post_type != 'attachment'
-                     AND post_status IN ('publish','draft','pending','private','future','inherit')
-                     AND post_content LIKE %s
-                     LIMIT 1",
-                    '%' . $escaped . '%'
-                )
-            );
-            if ( $found > 0 ) {
-                $ids = array_merge( $ids, $by_filename[ $filename ] );
-            }
-        }
-
-        // Search wp_postmeta.meta_value.
-        foreach ( $filenames as $filename ) {
-            // Skip if already found.
-            if ( ! empty( array_intersect( $by_filename[ $filename ], $ids ) ) ) {
-                continue;
-            }
-            $escaped = $wpdb->esc_like( $filename );
-            $found = $wpdb->get_var(
-                $wpdb->prepare(
-                    "SELECT COUNT(*) FROM {$wpdb->postmeta}
-                     WHERE meta_key != '_wp_attached_file'
-                     AND meta_key != '_wp_attachment_metadata'
-                     AND meta_value LIKE %s
-                     LIMIT 1",
-                    '%' . $escaped . '%'
-                )
-            );
-            if ( $found > 0 ) {
-                $ids = array_merge( $ids, $by_filename[ $filename ] );
-            }
-        }
-
-        // Search wp_options.option_value.
-        foreach ( $filenames as $filename ) {
-            if ( ! empty( array_intersect( $by_filename[ $filename ], $ids ) ) ) {
-                continue;
-            }
-            $escaped = $wpdb->esc_like( $filename );
-            $found = $wpdb->get_var(
-                $wpdb->prepare(
-                    "SELECT COUNT(*) FROM {$wpdb->options}
-                     WHERE option_value LIKE %s
-                     LIMIT 1",
-                    '%' . $escaped . '%'
-                )
-            );
-            if ( $found > 0 ) {
-                $ids = array_merge( $ids, $by_filename[ $filename ] );
-            }
-        }
-
-        // Search wp_termmeta.meta_value.
-        foreach ( $filenames as $filename ) {
-            if ( ! empty( array_intersect( $by_filename[ $filename ], $ids ) ) ) {
-                continue;
-            }
-            $escaped = $wpdb->esc_like( $filename );
-            $found = $wpdb->get_var(
-                $wpdb->prepare(
-                    "SELECT COUNT(*) FROM {$wpdb->termmeta}
-                     WHERE meta_value LIKE %s
-                     LIMIT 1",
-                    '%' . $escaped . '%'
-                )
-            );
-            if ( $found > 0 ) {
-                $ids = array_merge( $ids, $by_filename[ $filename ] );
+            if ( stripos( $blob, $basename ) !== false ) {
+                $ids[] = (int) $att->ID;
             }
         }
 
@@ -904,7 +894,6 @@ class UIF_Scanner {
 
         // 1. Imagify / optimizer meta: any image that has been optimized should
         //    be protected — the attachment IS the original backup.
-        //    This is fast: just 2 simple meta_key lookups.
         $imagify_ids = $wpdb->get_col(
             "SELECT DISTINCT post_id FROM {$wpdb->postmeta}
              WHERE meta_key IN ('_imagify_data', '_imagify_status')
@@ -927,78 +916,14 @@ class UIF_Scanner {
             $ids = array_merge( $ids, $backup_ids );
         }
 
-        // 3. Reverse lookup: if a .webp or .avif version of an image filename
-        //    is referenced in the database, mark the original as used.
-        //    Instead of querying per-image, we do ONE query to pull all .webp/.avif
-        //    references from the DB, then map them back to original attachments.
-        $webp_avif_refs = array();
-
-        // Search post_content for .webp and .avif references.
-        $rows = $wpdb->get_col(
-            "SELECT DISTINCT post_content FROM {$wpdb->posts}
-             WHERE post_content LIKE '%.webp%'
-             OR post_content LIKE '%.avif%'"
-        );
-        foreach ( $rows as $content ) {
-            if ( preg_match_all( '/([a-zA-Z0-9_\-]+)\.(jpe?g|png|gif|bmp|tiff?)\.(webp|avif)/i', $content, $m ) ) {
-                foreach ( $m[0] as $match ) {
-                    $webp_avif_refs[] = $match;
-                }
-            }
-            if ( preg_match_all( '/([a-zA-Z0-9_\-]+)\.(webp|avif)/i', $content, $m ) ) {
-                foreach ( $m[1] as $name ) {
-                    $webp_avif_refs[] = $name;
-                }
-            }
-        }
-
-        // Search postmeta for .webp and .avif references.
-        $rows = $wpdb->get_col(
-            "SELECT DISTINCT meta_value FROM {$wpdb->postmeta}
-             WHERE (meta_value LIKE '%.webp%' OR meta_value LIKE '%.avif%')
-             AND meta_key NOT LIKE '\_%imagify%'
-             AND meta_key != '_wp_attachment_metadata'"
-        );
-        foreach ( $rows as $val ) {
-            if ( preg_match_all( '/([a-zA-Z0-9_\-]+)\.(jpe?g|png|gif|bmp|tiff?)\.(webp|avif)/i', $val, $m ) ) {
-                foreach ( $m[0] as $match ) {
-                    $webp_avif_refs[] = $match;
-                }
-            }
-            if ( preg_match_all( '/([a-zA-Z0-9_\-]+)\.(webp|avif)/i', $val, $m ) ) {
-                foreach ( $m[1] as $name ) {
-                    $webp_avif_refs[] = $name;
-                }
-            }
-        }
-
-        // Search options for .webp and .avif references.
-        $rows = $wpdb->get_col(
-            "SELECT DISTINCT option_value FROM {$wpdb->options}
-             WHERE option_value LIKE '%.webp%'
-             OR option_value LIKE '%.avif%'"
-        );
-        foreach ( $rows as $val ) {
-            if ( preg_match_all( '/([a-zA-Z0-9_\-]+)\.(jpe?g|png|gif|bmp|tiff?)\.(webp|avif)/i', $val, $m ) ) {
-                foreach ( $m[0] as $match ) {
-                    $webp_avif_refs[] = $match;
-                }
-            }
-            if ( preg_match_all( '/([a-zA-Z0-9_\-]+)\.(webp|avif)/i', $val, $m ) ) {
-                foreach ( $m[1] as $name ) {
-                    $webp_avif_refs[] = $name;
-                }
-            }
-        }
-
-        if ( empty( $webp_avif_refs ) ) {
+        // 3. Reverse lookup: if a .webp/.avif version of an image filename is
+        //    found in site content, mark the original as used.
+        //    Reuses the cached content blob — no extra DB queries.
+        $blob = self::get_content_blob();
+        if ( empty( $blob ) ) {
             return $ids;
         }
 
-        $webp_avif_refs = array_unique( $webp_avif_refs );
-
-        // Now check which unused attachments have filenames that match these refs.
-        // e.g. if "photo.jpg.webp" is in content, we want to protect attachment "photo.jpg".
         $used_set = array_flip( array_unique( array_filter( array_map( 'absint', $used ) ) ) );
 
         $all_meta = $wpdb->get_results(
@@ -1017,9 +942,16 @@ class UIF_Scanner {
             $basename    = wp_basename( $row->meta_value );          // photo.jpg
             $name_no_ext = pathinfo( $basename, PATHINFO_FILENAME ); // photo
 
-            foreach ( $webp_avif_refs as $ref ) {
-                // Match "photo.jpg.webp" contains "photo.jpg", or "photo" matches name.
-                if ( stripos( $ref, $basename ) !== false || strcasecmp( $ref, $name_no_ext ) === 0 ) {
+            // Check if WebP/AVIF variant filenames appear in content.
+            $variants = array(
+                $basename . '.webp',      // photo.jpg.webp
+                $basename . '.avif',      // photo.jpg.avif
+                $name_no_ext . '.webp',   // photo.webp
+                $name_no_ext . '.avif',   // photo.avif
+            );
+
+            foreach ( $variants as $variant ) {
+                if ( stripos( $blob, $variant ) !== false ) {
                     $ids[] = $post_id;
                     break;
                 }
