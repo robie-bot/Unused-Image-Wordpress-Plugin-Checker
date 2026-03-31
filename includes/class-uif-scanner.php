@@ -832,41 +832,61 @@ class UIF_Scanner {
      * @param string $where     Extra WHERE clause (optional).
      * @return array Filenames that were found in the column.
      */
-    private static function batch_filename_search( $table, $column, $filenames, $where = '' ) {
+    /**
+     * Search post_content for filenames by loading posts in small chunks
+     * and using PHP stripos(). Zero LIKE queries — uses only indexed
+     * SELECT ... WHERE ID IN (...) lookups.
+     *
+     * @param array $filenames List of filenames to search for.
+     * @return array Filenames that were found in any post_content.
+     */
+    private static function search_post_content_for_filenames( $filenames ) {
         global $wpdb;
-        $found     = array();
-        $batch_size = 50;
-        $chunks    = array_chunk( $filenames, $batch_size );
+        $found = array();
+        $remaining = array_flip( $filenames ); // filename => anything (fast isset check)
+
+        // Get all post IDs with non-empty content (fast indexed query).
+        $post_ids = $wpdb->get_col(
+            "SELECT ID FROM {$wpdb->posts}
+             WHERE post_type != 'attachment'
+             AND post_status IN ('publish','draft','pending','private','future','inherit')
+             AND post_content != ''"
+        );
+
+        if ( empty( $post_ids ) ) {
+            return $found;
+        }
+
+        // Process posts in chunks of 200 — each chunk loads ~1-2 MB of content.
+        $chunks = array_chunk( $post_ids, 200 );
 
         foreach ( $chunks as $chunk ) {
-            $conditions = array();
-            foreach ( $chunk as $filename ) {
-                $conditions[] = $wpdb->prepare(
-                    "{$column} LIKE %s",
-                    '%' . $wpdb->esc_like( $filename ) . '%'
-                );
-            }
-            $or_clause = implode( ' OR ', $conditions );
-            $sql       = "SELECT DISTINCT 1 AS hit, {$column} AS val FROM {$table} WHERE ({$or_clause})";
-            if ( $where ) {
-                $sql = "SELECT DISTINCT {$column} AS val FROM {$table} WHERE ({$or_clause}) AND ({$where})";
-            } else {
-                $sql = "SELECT DISTINCT {$column} AS val FROM {$table} WHERE ({$or_clause})";
+            if ( empty( $remaining ) ) {
+                break; // All filenames found.
             }
 
-            $rows = $wpdb->get_col( $sql );
+            $in  = implode( ',', array_map( 'intval', $chunk ) );
+            $rows = $wpdb->get_col(
+                "SELECT post_content FROM {$wpdb->posts} WHERE ID IN ({$in})"
+            );
+
             if ( ! $rows ) {
                 continue;
             }
 
-            // Check which filenames from this chunk actually matched.
-            $content = implode( "\n", $rows );
-            foreach ( $chunk as $filename ) {
-                if ( stripos( $content, $filename ) !== false ) {
+            // Concatenate this chunk into one string for fast searching.
+            $blob = implode( "\n", $rows );
+            unset( $rows );
+
+            // Check each remaining filename.
+            foreach ( $remaining as $filename => $v ) {
+                if ( stripos( $blob, $filename ) !== false ) {
                     $found[] = $filename;
+                    unset( $remaining[ $filename ] );
                 }
             }
-            unset( $rows, $content );
+
+            unset( $blob );
         }
 
         return $found;
@@ -896,18 +916,8 @@ class UIF_Scanner {
             $by_filename[ $basename ][] = (int) $att->ID;
         }
 
-        // ONLY search wp_posts.post_content — this is the critical table for
-        // catching cross-domain/staging URLs. The other tables (postmeta, options,
-        // termmeta) are already covered by the specific builder methods (ACF,
-        // Elementor, WooCommerce, Divi, WPBakery, Impreza, widgets, options).
-        // Searching those huge tables with LIKE causes timeouts on large sites.
-        $filenames = array_keys( $by_filename );
-        $found = self::batch_filename_search(
-            $wpdb->posts,
-            'post_content',
-            $filenames,
-            "post_type != 'attachment' AND post_status IN ('publish','draft','pending','private','future','inherit')"
-        );
+        // Search post_content using chunk-and-strpos approach (no LIKE queries).
+        $found = self::search_post_content_for_filenames( array_keys( $by_filename ) );
 
         foreach ( $found as $filename ) {
             if ( isset( $by_filename[ $filename ] ) ) {
@@ -956,7 +966,6 @@ class UIF_Scanner {
 
         // 3. Reverse lookup: if a .webp/.avif version of an image filename is
         //    found in post_content, mark the original as used.
-        //    Only searches post_content to avoid slow full-table scans on postmeta.
         $used_set = array_flip( array_unique( array_filter( array_map( 'absint', $used ) ) ) );
 
         $all_meta = $wpdb->get_results(
@@ -984,13 +993,8 @@ class UIF_Scanner {
             return $ids;
         }
 
-        // Only search post_content — fast and sufficient.
-        $found = self::batch_filename_search(
-            $wpdb->posts,
-            'post_content',
-            array_keys( $variant_map ),
-            "post_content != ''"
-        );
+        // Search using chunk-and-strpos (no LIKE queries).
+        $found = self::search_post_content_for_filenames( array_keys( $variant_map ) );
 
         foreach ( $found as $variant ) {
             if ( isset( $variant_map[ $variant ] ) ) {
