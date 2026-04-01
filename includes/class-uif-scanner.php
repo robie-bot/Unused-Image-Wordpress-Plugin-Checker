@@ -1291,17 +1291,36 @@ class UIF_Scanner {
             );
         }
 
+        // Check if each orphaned file's filename is referenced anywhere in the database.
+        // If it is, mark it as "referenced" so the user knows it may be in use.
+        $orphaned = self::check_orphan_references( $orphaned );
+
+        // Separate into truly orphaned (not referenced) and referenced.
+        $truly_orphaned = array();
+        $referenced     = array();
+        $total_size     = 0;
+
+        foreach ( $orphaned as $file ) {
+            if ( $file['referenced'] ) {
+                $referenced[] = $file;
+            } else {
+                $truly_orphaned[] = $file;
+                $total_size += $file['filesize'];
+            }
+        }
+
         // Sort by modified date descending.
-        usort( $orphaned, function ( $a, $b ) {
+        usort( $truly_orphaned, function ( $a, $b ) {
             return strcmp( $b['modified'], $a['modified'] );
         } );
 
-        $total = count( $orphaned );
+        $total = count( $truly_orphaned );
 
         return array(
-            'files'      => array_slice( $orphaned, $offset, $limit ),
+            'files'      => array_slice( $truly_orphaned, $offset, $limit ),
             'total'      => $total,
             'total_size' => $total_size,
+            'referenced_count' => count( $referenced ),
         );
     }
 
@@ -1347,5 +1366,96 @@ class UIF_Scanner {
         }
 
         return $known;
+    }
+
+    /**
+     * Check if orphaned files are referenced anywhere in the database.
+     * Uses the same chunk+strpos approach as the filename search.
+     *
+     * @param array $orphaned Array of orphaned file info arrays.
+     * @return array Same array with 'referenced' key added to each item.
+     */
+    private static function check_orphan_references( $orphaned ) {
+        if ( empty( $orphaned ) ) {
+            return $orphaned;
+        }
+
+        global $wpdb;
+
+        // Build filename lookup.
+        $filename_to_indices = array();
+        foreach ( $orphaned as $i => $file ) {
+            $orphaned[ $i ]['referenced'] = false;
+            $filename_to_indices[ $file['filename'] ][] = $i;
+        }
+
+        $filenames = array_keys( $filename_to_indices );
+
+        // Search post_content in chunks of 200 posts.
+        $post_ids = $wpdb->get_col(
+            "SELECT ID FROM {$wpdb->posts}
+             WHERE post_content != ''
+             AND post_status IN ('publish','draft','pending','private','future','inherit')"
+        );
+
+        if ( $post_ids ) {
+            $remaining = array_flip( $filenames );
+            $chunks = array_chunk( $post_ids, 200 );
+
+            foreach ( $chunks as $chunk ) {
+                if ( empty( $remaining ) ) {
+                    break;
+                }
+
+                $in   = implode( ',', array_map( 'intval', $chunk ) );
+                $rows = $wpdb->get_col( "SELECT post_content FROM {$wpdb->posts} WHERE ID IN ({$in})" );
+
+                if ( ! $rows ) {
+                    continue;
+                }
+
+                $blob = implode( "\n", $rows );
+                unset( $rows );
+
+                foreach ( $remaining as $filename => $v ) {
+                    if ( stripos( $blob, $filename ) !== false ) {
+                        // Mark all orphaned files with this filename as referenced.
+                        foreach ( $filename_to_indices[ $filename ] as $idx ) {
+                            $orphaned[ $idx ]['referenced'] = true;
+                        }
+                        unset( $remaining[ $filename ] );
+                    }
+                }
+
+                unset( $blob );
+            }
+        }
+
+        // Also check postmeta for remaining filenames (quick check with limited meta keys).
+        $still_remaining = array();
+        foreach ( $orphaned as $i => $file ) {
+            if ( ! $file['referenced'] ) {
+                $still_remaining[ $file['filename'] ] = $i;
+            }
+        }
+
+        if ( ! empty( $still_remaining ) ) {
+            foreach ( $still_remaining as $filename => $idx ) {
+                $esc = '%' . $wpdb->esc_like( $filename ) . '%';
+                $found = $wpdb->get_var( $wpdb->prepare(
+                    "SELECT 1 FROM {$wpdb->options}
+                     WHERE option_value LIKE %s
+                     AND option_name NOT LIKE '_transient%%'
+                     LIMIT 1",
+                    $esc
+                ) );
+
+                if ( $found ) {
+                    $orphaned[ $idx ]['referenced'] = true;
+                }
+            }
+        }
+
+        return $orphaned;
     }
 }
