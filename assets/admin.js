@@ -398,25 +398,32 @@
     function fetchBatch(offset, total, retries) {
         if (typeof retries === 'undefined') retries = 0;
         var maxRetries = 3;
+        var batchSize = uif.batch_size;
+
+        // If we've gone past the total, we're done.
+        if (offset >= total) {
+            finishScan();
+            return;
+        }
 
         $.post(uif.ajax_url, {
             action:     'uif_scan_batch',
             nonce:      uif.nonce,
             offset:     offset,
-            batch_size: uif.batch_size
+            batch_size: batchSize
         })
         .done(function (res) {
             if (!res.success) {
-                // Retry on server error.
                 if (retries < maxRetries) {
-                    setProgress(null, null, 'Batch failed, retrying... (' + (retries + 1) + '/' + maxRetries + ')');
+                    setProgress(null, null, 'Batch at offset ' + offset + ' failed, retrying... (' + (retries + 1) + '/' + maxRetries + ')');
                     setTimeout(function () {
                         fetchBatch(offset, total, retries + 1);
                     }, 2000);
                     return;
                 }
-                showNotice(res.data || uif.i18n.error, 'error');
-                finishScan();
+                // Skip this batch and continue to the next one.
+                setProgress(null, null, 'Skipped batch at offset ' + offset + ', continuing...');
+                fetchBatch(offset + batchSize, total, 0);
                 return;
             }
 
@@ -439,13 +446,12 @@
             $('#uif-size').text(formatSize(scanData.total_size));
 
             if (res.data.has_more) {
-                fetchBatch(offset + uif.batch_size, total, 0);
+                fetchBatch(offset + batchSize, total, 0);
             } else {
                 finishScan();
             }
         })
         .fail(function (jqXHR, textStatus) {
-            // Retry on network/timeout errors.
             if (retries < maxRetries) {
                 var loaded = scanData.unused_images.length;
                 setProgress(null, null, 'Request failed (' + textStatus + '), retrying in 3s... (' + (retries + 1) + '/' + maxRetries + ') — ' + loaded + ' loaded so far');
@@ -454,18 +460,25 @@
                 }, 3000);
                 return;
             }
-            showNotice('Failed to load all images after ' + maxRetries + ' retries. ' + scanData.unused_images.length + ' of ' + total + ' loaded.', 'warning');
-            finishScan();
+            // Skip this batch and continue to the next one instead of aborting.
+            setProgress(null, null, 'Batch at offset ' + offset + ' failed, skipping to next...');
+            fetchBatch(offset + batchSize, total, 0);
         });
     }
 
     function finishScan() {
+        // Use actual loaded count for display (may differ from server count if batches were skipped).
+        var actualCount = scanData.unused_images.length;
+
         $('#uif-total').text(scanData.total_images);
         $('#uif-used').text(scanData.used_count);
-        $('#uif-unused').text(scanData.unused_count);
+        $('#uif-unused').text(actualCount);
         $('#uif-size').text(formatSize(scanData.total_size));
 
-        if (scanData.unused_count > 0) {
+        // Update internal count to match what actually loaded.
+        scanData.unused_count = actualCount;
+
+        if (actualCount > 0) {
             tableWrap.show();
             emptyMsg.hide();
             currentPage = 1;
@@ -476,7 +489,7 @@
         }
 
         results.show();
-        setProgress(100, 'Done!', scanData.unused_count + ' unused images found — ' + formatSize(scanData.total_size) + ' recoverable');
+        setProgress(100, 'Done!', actualCount + ' unused images found — ' + formatSize(scanData.total_size) + ' recoverable');
 
         setTimeout(function () { progress.slideUp(300); }, 1500);
         scanDone();
