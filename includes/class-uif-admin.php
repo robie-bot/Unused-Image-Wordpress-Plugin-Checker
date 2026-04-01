@@ -17,6 +17,12 @@ class UIF_Admin {
         add_action( 'wp_ajax_uif_orphan_phase', array( __CLASS__, 'ajax_orphan_phase' ) );
         add_action( 'wp_ajax_uif_orphan_delete', array( __CLASS__, 'ajax_orphan_delete' ) );
         add_action( 'admin_init', array( __CLASS__, 'handle_csv_export' ) );
+
+        // Media Library integration — "Unused" filter tab.
+        add_filter( 'views_upload', array( __CLASS__, 'add_unused_media_view' ) );
+        add_action( 'pre_get_posts', array( __CLASS__, 'filter_unused_media' ) );
+        add_filter( 'manage_media_columns', array( __CLASS__, 'add_usage_column' ) );
+        add_action( 'manage_media_custom_column', array( __CLASS__, 'render_usage_column' ), 10, 2 );
     }
 
     public static function add_menu() {
@@ -66,6 +72,88 @@ class UIF_Admin {
                 'no_selection'  => __( 'Please select at least one image.', 'unused-image-finder' ),
             ),
         ) );
+    }
+
+    /**
+     * Add an "Unused" link to the Media Library filter views.
+     * Only shows if a scan has been run (results stored in transient).
+     */
+    public static function add_unused_media_view( $views ) {
+        $unused_ids = get_transient( 'uif_unused_ids' );
+        if ( ! is_array( $unused_ids ) || empty( $unused_ids ) ) {
+            return $views;
+        }
+
+        $count   = count( $unused_ids );
+        $current = ( isset( $_GET['uif_unused'] ) && '1' === $_GET['uif_unused'] ) ? 'current' : '';
+
+        $views['uif_unused'] = sprintf(
+            '<a href="%s" class="%s">%s <span class="count">(%s)</span></a>',
+            esc_url( admin_url( 'upload.php?uif_unused=1' ) ),
+            $current,
+            __( 'Unused', 'unused-image-finder' ),
+            number_format_i18n( $count )
+        );
+
+        return $views;
+    }
+
+    /**
+     * Filter the Media Library query to show only unused images when the filter is active.
+     */
+    public static function filter_unused_media( $query ) {
+        if ( ! is_admin() || ! $query->is_main_query() ) {
+            return;
+        }
+
+        $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+        if ( ! $screen || 'upload' !== $screen->id ) {
+            return;
+        }
+
+        if ( ! isset( $_GET['uif_unused'] ) || '1' !== $_GET['uif_unused'] ) {
+            return;
+        }
+
+        $unused_ids = get_transient( 'uif_unused_ids' );
+        if ( ! is_array( $unused_ids ) || empty( $unused_ids ) ) {
+            // No scan results — show nothing.
+            $query->set( 'post__in', array( 0 ) );
+            return;
+        }
+
+        $query->set( 'post__in', $unused_ids );
+        $query->set( 'post_type', 'attachment' );
+        $query->set( 'post_status', 'inherit' );
+    }
+
+    /**
+     * Add a "Usage" column to the Media Library list table.
+     */
+    public static function add_usage_column( $columns ) {
+        $unused_ids = get_transient( 'uif_unused_ids' );
+        if ( ! is_array( $unused_ids ) || empty( $unused_ids ) ) {
+            return $columns;
+        }
+
+        $columns['uif_usage'] = __( 'Usage', 'unused-image-finder' );
+        return $columns;
+    }
+
+    /**
+     * Render the "Usage" column content.
+     */
+    public static function render_usage_column( $column_name, $post_id ) {
+        if ( 'uif_usage' !== $column_name ) {
+            return;
+        }
+
+        $unused_ids = get_transient( 'uif_unused_ids' );
+        if ( is_array( $unused_ids ) && in_array( $post_id, $unused_ids, true ) ) {
+            echo '<span style="color:#d63638;font-weight:600;">&#9888; Unused</span>';
+        } else {
+            echo '<span style="color:#00a32a;">&#10003; Used</span>';
+        }
     }
 
     public static function render_page() {
@@ -333,6 +421,9 @@ class UIF_Admin {
 
         // Store for batch loading + CSV export.
         set_transient( 'uif_unused_ids_' . $uid, $unused, HOUR_IN_SECONDS );
+
+        // Also store a shared copy for the Media Library "Unused" filter tab.
+        set_transient( 'uif_unused_ids', $unused, HOUR_IN_SECONDS );
 
         // Clean up temp transients.
         delete_transient( 'uif_all_ids_' . $uid );
