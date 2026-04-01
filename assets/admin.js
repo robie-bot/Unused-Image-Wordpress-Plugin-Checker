@@ -421,9 +421,11 @@
                     }, 2000);
                     return;
                 }
-                // Skip this batch and continue to the next one.
+                // Skip this batch and continue to the next one after a delay.
                 setProgress(null, null, 'Skipped batch at offset ' + offset + ', continuing...');
-                fetchBatch(offset + batchSize, total, 0);
+                setTimeout(function () {
+                    fetchBatch(offset + batchSize, total, 0);
+                }, 500);
                 return;
             }
 
@@ -446,7 +448,10 @@
             $('#uif-size').text(formatSize(scanData.total_size));
 
             if (res.data.has_more) {
-                fetchBatch(offset + batchSize, total, 0);
+                // Small delay between batches to avoid server rate-limiting.
+                setTimeout(function () {
+                    fetchBatch(offset + batchSize, total, 0);
+                }, 300);
             } else {
                 finishScan();
             }
@@ -462,7 +467,9 @@
             }
             // Skip this batch and continue to the next one instead of aborting.
             setProgress(null, null, 'Batch at offset ' + offset + ' failed, skipping to next...');
-            fetchBatch(offset + batchSize, total, 0);
+            setTimeout(function () {
+                fetchBatch(offset + batchSize, total, 0);
+            }, 500);
         });
     }
 
