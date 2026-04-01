@@ -128,11 +128,27 @@ class UIF_Admin {
     }
 
     /**
+     * Get the cached set of unused IDs (flipped array for O(1) lookup).
+     */
+    private static $unused_set = null;
+
+    private static function get_unused_set() {
+        if ( null === self::$unused_set ) {
+            $unused_ids = get_transient( 'uif_unused_ids' );
+            if ( is_array( $unused_ids ) && ! empty( $unused_ids ) ) {
+                self::$unused_set = array_flip( array_map( 'intval', $unused_ids ) );
+            } else {
+                self::$unused_set = array();
+            }
+        }
+        return self::$unused_set;
+    }
+
+    /**
      * Add a "Usage" column to the Media Library list table.
      */
     public static function add_usage_column( $columns ) {
-        $unused_ids = get_transient( 'uif_unused_ids' );
-        if ( ! is_array( $unused_ids ) || empty( $unused_ids ) ) {
+        if ( empty( self::get_unused_set() ) ) {
             return $columns;
         }
 
@@ -148,8 +164,8 @@ class UIF_Admin {
             return;
         }
 
-        $unused_ids = get_transient( 'uif_unused_ids' );
-        if ( is_array( $unused_ids ) && in_array( (int) $post_id, array_map( 'intval', $unused_ids ) ) ) {
+        $set = self::get_unused_set();
+        if ( isset( $set[ (int) $post_id ] ) ) {
             echo '<span style="color:#d63638;font-weight:600;">&#9888; Unused</span>';
         } else {
             echo '<span style="color:#00a32a;">&#10003; Used</span>';
