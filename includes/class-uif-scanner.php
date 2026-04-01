@@ -202,6 +202,17 @@ class UIF_Scanner {
                 }
             }
 
+            // Relative upload paths without domain (e.g. src="/wp-content/uploads/2021/09/file.svg").
+            // Catches hover images, lazy-loaded images, JS-injected images, etc.
+            if ( preg_match_all( '/(?:^|["\'\s=(])(' . $upload_path_re . '\/[^\s"\'<>)]+)/i', $content, $m ) ) {
+                foreach ( $m[1] as $rel_path ) {
+                    $found = self::url_to_attachment_id_cross_domain( site_url( $rel_path ) );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+
             // Gutenberg block attributes with "id":123.
             if ( preg_match_all( '/"id"\s*:\s*(\d+)/', $content, $m ) ) {
                 $ids = array_merge( $ids, $m[1] );
@@ -669,6 +680,17 @@ class UIF_Scanner {
                 }
             }
 
+            // Relative upload paths WITHOUT domain (e.g. /wp-content/uploads/2021/09/file.svg
+            // or src="/wp-content/uploads/..."). Handles hover images, lazy-loaded images, etc.
+            if ( preg_match_all( '/(?:^|["\'\s=(])(' . $upload_path_re . '\/[^\s"\'<>\]\[)]+)/i', $content, $m ) ) {
+                foreach ( $m[1] as $rel_path ) {
+                    $found = self::url_to_attachment_id_cross_domain( site_url( $rel_path ) );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+
             // JSON-style: any key containing "image", "img", "id", "logo", "photo",
             // "thumbnail", "media", "icon", "avatar", "background" with a numeric value.
             // Catches: "id":123, "image":"456", "us_image_id":"789", etc.
@@ -1036,8 +1058,11 @@ class UIF_Scanner {
         // Matches ANY domain's /wp-content/uploads/ path (staging, CDN, old domain).
         $bg_regex_cross = '/background(?:-image)?\s*:[^;}]*url\(\s*["\']?(https?:\/\/[^\s"\'<>)]*' . $upload_path_re . '\/[^\s"\'<>)]+)["\']?\s*\)/i';
 
-        // Helper: extract from both current-domain and cross-domain patterns.
-        $extract_bg = function ( $text ) use ( &$ids, $bg_regex, $bg_regex_cross ) {
+        // Matches relative upload paths in background url() — no domain, just /wp-content/uploads/...
+        $bg_regex_relative = '/background(?:-image)?\s*:[^;}]*url\(\s*["\']?(' . $upload_path_re . '\/[^\s"\'<>)]+)["\']?\s*\)/i';
+
+        // Helper: extract from current-domain, cross-domain, and relative-path patterns.
+        $extract_bg = function ( $text ) use ( &$ids, $bg_regex, $bg_regex_cross, $bg_regex_relative ) {
             if ( preg_match_all( $bg_regex, $text, $m ) ) {
                 foreach ( $m[1] as $url ) {
                     $found = self::url_to_attachment_id( $url );
@@ -1049,6 +1074,14 @@ class UIF_Scanner {
             if ( preg_match_all( $bg_regex_cross, $text, $m ) ) {
                 foreach ( $m[1] as $url ) {
                     $found = self::url_to_attachment_id_cross_domain( $url );
+                    if ( $found ) {
+                        $ids[] = $found;
+                    }
+                }
+            }
+            if ( preg_match_all( $bg_regex_relative, $text, $m ) ) {
+                foreach ( $m[1] as $rel_path ) {
+                    $found = self::url_to_attachment_id_cross_domain( site_url( $rel_path ) );
                     if ( $found ) {
                         $ids[] = $found;
                     }
