@@ -122,7 +122,7 @@ class UIF_Admin {
             return;
         }
 
-        $query->set( 'post__in', $unused_ids );
+        $query->set( 'post__in', array_map( 'intval', $unused_ids ) );
         $query->set( 'post_type', 'attachment' );
         $query->set( 'post_status', 'inherit' );
     }
@@ -149,7 +149,7 @@ class UIF_Admin {
         }
 
         $unused_ids = get_transient( 'uif_unused_ids' );
-        if ( is_array( $unused_ids ) && in_array( $post_id, $unused_ids, true ) ) {
+        if ( is_array( $unused_ids ) && in_array( (int) $post_id, array_map( 'intval', $unused_ids ) ) ) {
             echo '<span style="color:#d63638;font-weight:600;">&#9888; Unused</span>';
         } else {
             echo '<span style="color:#00a32a;">&#10003; Used</span>';
