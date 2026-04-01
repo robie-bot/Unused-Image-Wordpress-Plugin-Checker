@@ -50,7 +50,7 @@ class UIF_Admin {
         wp_localize_script( 'uif-admin', 'uif', array(
             'ajax_url'   => admin_url( 'admin-ajax.php' ),
             'nonce'      => wp_create_nonce( 'uif_nonce' ),
-            'batch_size' => 50,
+            'batch_size' => 25,
             'per_page'   => 50,
             'csv_url'    => wp_nonce_url( admin_url( 'admin.php?page=unused-image-finder&uif_export_csv=1' ), 'uif_csv_export' ),
             'i18n'       => array(

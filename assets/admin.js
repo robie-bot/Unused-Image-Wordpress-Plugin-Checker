@@ -397,7 +397,7 @@
 
     function fetchBatch(offset, total, retries) {
         if (typeof retries === 'undefined') retries = 0;
-        var maxRetries = 3;
+        var maxRetries = 5;
         var batchSize = uif.batch_size;
 
         // If we've gone past the total, we're done.
@@ -406,26 +406,35 @@
             return;
         }
 
-        $.post(uif.ajax_url, {
-            action:     'uif_scan_batch',
-            nonce:      uif.nonce,
-            offset:     offset,
-            batch_size: batchSize
+        var loaded = scanData.unused_images.length;
+        setProgress(null, null, loaded + ' of ' + total + ' images loaded... (requesting batch at ' + offset + ')');
+
+        $.ajax({
+            url: uif.ajax_url,
+            type: 'POST',
+            timeout: 30000,  // 30 second timeout per batch request
+            data: {
+                action:     'uif_scan_batch',
+                nonce:      uif.nonce,
+                offset:     offset,
+                batch_size: batchSize
+            }
         })
         .done(function (res) {
             if (!res.success) {
                 if (retries < maxRetries) {
-                    setProgress(null, null, 'Batch at offset ' + offset + ' failed, retrying... (' + (retries + 1) + '/' + maxRetries + ')');
+                    var waitTime = 2000 + (retries * 1000); // Increasing delay: 2s, 3s, 4s, 5s, 6s
+                    setProgress(null, null, 'Batch at offset ' + offset + ' failed, retrying in ' + (waitTime/1000) + 's... (' + (retries + 1) + '/' + maxRetries + ')');
                     setTimeout(function () {
                         fetchBatch(offset, total, retries + 1);
-                    }, 2000);
+                    }, waitTime);
                     return;
                 }
                 // Skip this batch and continue to the next one after a delay.
                 setProgress(null, null, 'Skipped batch at offset ' + offset + ', continuing...');
                 setTimeout(function () {
                     fetchBatch(offset + batchSize, total, 0);
-                }, 500);
+                }, 2000);
                 return;
             }
 
@@ -448,10 +457,10 @@
             $('#uif-size').text(formatSize(scanData.total_size));
 
             if (res.data.has_more) {
-                // Small delay between batches to avoid server rate-limiting.
+                // 1 second delay between batches to avoid server rate-limiting.
                 setTimeout(function () {
                     fetchBatch(offset + batchSize, total, 0);
-                }, 300);
+                }, 1000);
             } else {
                 finishScan();
             }
@@ -459,17 +468,18 @@
         .fail(function (jqXHR, textStatus) {
             if (retries < maxRetries) {
                 var loaded = scanData.unused_images.length;
-                setProgress(null, null, 'Request failed (' + textStatus + '), retrying in 3s... (' + (retries + 1) + '/' + maxRetries + ') — ' + loaded + ' loaded so far');
+                var waitTime = 3000 + (retries * 2000); // Increasing delay: 3s, 5s, 7s, 9s, 11s
+                setProgress(null, null, 'Request failed (' + textStatus + '), retrying in ' + (waitTime/1000) + 's... (' + (retries + 1) + '/' + maxRetries + ') — ' + loaded + ' loaded so far');
                 setTimeout(function () {
                     fetchBatch(offset, total, retries + 1);
-                }, 3000);
+                }, waitTime);
                 return;
             }
             // Skip this batch and continue to the next one instead of aborting.
-            setProgress(null, null, 'Batch at offset ' + offset + ' failed, skipping to next...');
+            setProgress(null, null, 'Batch at offset ' + offset + ' failed after ' + maxRetries + ' retries, skipping...');
             setTimeout(function () {
                 fetchBatch(offset + batchSize, total, 0);
-            }, 500);
+            }, 2000);
         });
     }
 
