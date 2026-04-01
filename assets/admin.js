@@ -738,53 +738,104 @@
     var orphanData = [];
     var orphanSelectedPaths = {};
 
+    var orphanPhases = [
+        { phase: 1, label: 'Scanning uploads folder...', pct: 33 },
+        { phase: 2, label: 'Checking references in content...', pct: 66 },
+        { phase: 3, label: 'Checking options & finalizing...', pct: 100 }
+    ];
+
     $('#uif-orphan-scan-btn').on('click', function () {
         var btn = $(this);
         btn.prop('disabled', true);
         $('#uif-orphan-progress').show();
         $('#uif-orphan-results').hide();
         $('#uif-orphan-tbody').empty();
+        $('#uif-orphan-progress-bar').css('width', '0%');
         orphanData = [];
         orphanSelectedPaths = {};
+
+        runOrphanPhase(0, btn);
+    });
+
+    function runOrphanPhase(index, btn) {
+        if (index >= orphanPhases.length) {
+            // Should not reach here — phase 3 handles completion.
+            btn.prop('disabled', false);
+            $('#uif-orphan-progress').hide();
+            return;
+        }
+
+        var phaseInfo = orphanPhases[index];
+        $('#uif-orphan-progress-text').text('Phase ' + phaseInfo.phase + '/3: ' + phaseInfo.label);
+        $('#uif-orphan-progress-bar').css('width', (phaseInfo.pct - 33) + '%');
 
         $.ajax({
             url: uif.ajax_url,
             type: 'POST',
-            timeout: 120000,
+            timeout: 180000,
             data: {
-                action: 'uif_orphan_scan',
-                nonce:  uif.nonce
+                action: 'uif_orphan_phase',
+                nonce:  uif.nonce,
+                phase:  phaseInfo.phase
             }
         })
         .done(function (res) {
-            btn.prop('disabled', false);
-            $('#uif-orphan-progress').hide();
-            $('#uif-orphan-results').show();
+            $('#uif-orphan-progress-bar').css('width', phaseInfo.pct + '%');
 
             if (!res.success) {
-                showNotice(res.data || 'Orphan scan failed.', 'error');
+                // Phase failed — show warning but continue to next phase.
+                showNotice('Orphan scan phase ' + phaseInfo.phase + ' failed: ' + (res.data || 'Unknown error') + '. Continuing...', 'warning');
+                if (index < orphanPhases.length - 1) {
+                    setTimeout(function () { runOrphanPhase(index + 1, btn); }, 500);
+                } else {
+                    btn.prop('disabled', false);
+                    $('#uif-orphan-progress').hide();
+                }
                 return;
             }
 
-            orphanData = res.data.files;
-            $('#uif-orphan-count').text(res.data.total);
-            $('#uif-orphan-size').text(formatSize(res.data.total_size));
+            // If this is the final phase (3), show results.
+            if (phaseInfo.phase === 3) {
+                btn.prop('disabled', false);
+                $('#uif-orphan-progress').hide();
+                $('#uif-orphan-results').show();
 
-            if (orphanData.length > 0) {
-                $('#uif-orphan-table-wrap').show();
-                $('#uif-orphan-empty').hide();
-                renderOrphanTable();
+                orphanData = res.data.files;
+                $('#uif-orphan-count').text(res.data.total);
+                $('#uif-orphan-size').text(formatSize(res.data.total_size));
+
+                if (res.data.referenced_count > 0) {
+                    showNotice(res.data.referenced_count + ' file(s) found on disk but excluded — they are referenced in your content.', 'info');
+                }
+
+                if (orphanData.length > 0) {
+                    $('#uif-orphan-table-wrap').show();
+                    $('#uif-orphan-empty').hide();
+                    renderOrphanTable();
+                } else {
+                    $('#uif-orphan-table-wrap').hide();
+                    $('#uif-orphan-empty').show();
+                }
             } else {
-                $('#uif-orphan-table-wrap').hide();
-                $('#uif-orphan-empty').show();
+                // Move to next phase.
+                setTimeout(function () { runOrphanPhase(index + 1, btn); }, 500);
             }
         })
-        .fail(function () {
-            btn.prop('disabled', false);
-            $('#uif-orphan-progress').hide();
-            showNotice('Orphan scan failed. Server may have timed out.', 'error');
+        .fail(function (xhr, status) {
+            // Phase failed (timeout or error) — skip and continue.
+            var msg = status === 'timeout' ? 'timed out' : 'server error';
+            showNotice('Orphan scan phase ' + phaseInfo.phase + ' ' + msg + '. Skipping...', 'warning');
+            $('#uif-orphan-progress-bar').css('width', phaseInfo.pct + '%');
+
+            if (index < orphanPhases.length - 1) {
+                setTimeout(function () { runOrphanPhase(index + 1, btn); }, 500);
+            } else {
+                btn.prop('disabled', false);
+                $('#uif-orphan-progress').hide();
+                showNotice('Orphan scan could not complete. Try again or check server timeout settings.', 'error');
+            }
         });
-    });
+    }
 
     function renderOrphanTable() {
         var html = '';

@@ -1205,26 +1205,23 @@ class UIF_Scanner {
     }
 
     /**
-     * Scan the /wp-content/uploads/ folder on disk and find orphaned image files
+     * Phase 1: Scan the /wp-content/uploads/ folder on disk and find files
      * that exist on disk but are NOT registered in the WordPress database.
      *
-     * These are files uploaded via FTP, leftover thumbnails, optimizer backups, etc.
+     * Stores results in a transient for subsequent phases.
      *
-     * @param int $offset  Start index for pagination.
-     * @param int $limit   How many to return.
      * @return array {
-     *     @type array  $files       Array of orphaned file info.
-     *     @type int    $total       Total orphaned files found.
-     *     @type int    $total_size  Total size of orphaned files.
+     *     @type int $found  Number of orphaned files found on disk.
      * }
      */
-    public static function get_orphaned_files( $offset = 0, $limit = 50 ) {
+    public static function orphan_scan_disk() {
         $upload_dir = wp_get_upload_dir();
         $base_dir   = $upload_dir['basedir'];
         $base_url   = $upload_dir['baseurl'];
 
         if ( ! is_dir( $base_dir ) ) {
-            return array( 'files' => array(), 'total' => 0, 'total_size' => 0 );
+            set_transient( 'uif_orphan_files', array(), HOUR_IN_SECONDS );
+            return array( 'found' => 0 );
         }
 
         // Image extensions to look for.
@@ -1235,7 +1232,6 @@ class UIF_Scanner {
 
         // Recursively scan the uploads directory.
         $orphaned = array();
-        $total_size = 0;
 
         $iterator = new RecursiveIteratorIterator(
             new RecursiveDirectoryIterator( $base_dir, RecursiveDirectoryIterator::SKIP_DOTS ),
@@ -1279,7 +1275,6 @@ class UIF_Scanner {
             }
 
             $size = $file->getSize();
-            $total_size += $size;
 
             $orphaned[] = array(
                 'path'      => $relative,
@@ -1291,18 +1286,136 @@ class UIF_Scanner {
             );
         }
 
-        // Check if each orphaned file's filename is referenced anywhere in the database.
-        // If it is, mark it as "referenced" so the user knows it may be in use.
-        $orphaned = self::check_orphan_references( $orphaned );
+        // Store in transient for next phases.
+        set_transient( 'uif_orphan_files', $orphaned, HOUR_IN_SECONDS );
+
+        return array( 'found' => count( $orphaned ) );
+    }
+
+    /**
+     * Phase 2: Check orphaned files against post_content for references.
+     * Reads from transient, updates referenced status, saves back.
+     *
+     * @return array {
+     *     @type int $checked       Number of files checked.
+     *     @type int $referenced    Number found referenced in post_content.
+     * }
+     */
+    public static function orphan_check_content() {
+        $orphaned = get_transient( 'uif_orphan_files' );
+        if ( ! is_array( $orphaned ) || empty( $orphaned ) ) {
+            return array( 'checked' => 0, 'referenced' => 0 );
+        }
+
+        global $wpdb;
+
+        // Build filename lookup.
+        $filename_to_indices = array();
+        foreach ( $orphaned as $i => $file ) {
+            if ( ! isset( $orphaned[ $i ]['referenced'] ) ) {
+                $orphaned[ $i ]['referenced'] = false;
+            }
+            $filename_to_indices[ $file['filename'] ][] = $i;
+        }
+
+        $filenames = array_keys( $filename_to_indices );
+        $remaining = array_flip( $filenames );
+        $ref_count = 0;
+
+        // Search post_content in chunks of 200 posts.
+        $post_ids = $wpdb->get_col(
+            "SELECT ID FROM {$wpdb->posts}
+             WHERE post_content != ''
+             AND post_status IN ('publish','draft','pending','private','future','inherit')"
+        );
+
+        if ( $post_ids ) {
+            $chunks = array_chunk( $post_ids, 200 );
+
+            foreach ( $chunks as $chunk ) {
+                if ( empty( $remaining ) ) {
+                    break;
+                }
+
+                $in   = implode( ',', array_map( 'intval', $chunk ) );
+                $rows = $wpdb->get_col( "SELECT post_content FROM {$wpdb->posts} WHERE ID IN ({$in})" );
+
+                if ( ! $rows ) {
+                    continue;
+                }
+
+                $blob = implode( "\n", $rows );
+                unset( $rows );
+
+                foreach ( $remaining as $filename => $v ) {
+                    if ( stripos( $blob, $filename ) !== false ) {
+                        foreach ( $filename_to_indices[ $filename ] as $idx ) {
+                            $orphaned[ $idx ]['referenced'] = true;
+                            $ref_count++;
+                        }
+                        unset( $remaining[ $filename ] );
+                    }
+                }
+
+                unset( $blob );
+            }
+        }
+
+        // Save updated data back to transient for next phase.
+        set_transient( 'uif_orphan_files', $orphaned, HOUR_IN_SECONDS );
+
+        return array( 'checked' => count( $orphaned ), 'referenced' => $ref_count );
+    }
+
+    /**
+     * Phase 3: Check remaining orphaned files against wp_options, finalize results.
+     * Reads from transient, separates referenced vs truly orphaned, stores final result.
+     *
+     * @param int $offset  Start index for pagination.
+     * @param int $limit   How many to return.
+     * @return array {
+     *     @type array  $files            Array of orphaned file info.
+     *     @type int    $total            Total truly orphaned files.
+     *     @type int    $total_size       Total size of truly orphaned files.
+     *     @type int    $referenced_count Number of files excluded (referenced).
+     * }
+     */
+    public static function orphan_check_options_and_finalize( $offset = 0, $limit = 5000 ) {
+        $orphaned = get_transient( 'uif_orphan_files' );
+        if ( ! is_array( $orphaned ) || empty( $orphaned ) ) {
+            return array( 'files' => array(), 'total' => 0, 'total_size' => 0, 'referenced_count' => 0 );
+        }
+
+        global $wpdb;
+
+        // Check wp_options for any files not yet marked as referenced.
+        foreach ( $orphaned as $i => $file ) {
+            if ( ! empty( $file['referenced'] ) ) {
+                continue;
+            }
+
+            $esc = '%' . $wpdb->esc_like( $file['filename'] ) . '%';
+            $found = $wpdb->get_var( $wpdb->prepare(
+                "SELECT 1 FROM {$wpdb->options}
+                 WHERE option_value LIKE %s
+                 AND option_name NOT LIKE '_transient%%'
+                 LIMIT 1",
+                $esc
+            ) );
+
+            if ( $found ) {
+                $orphaned[ $i ]['referenced'] = true;
+            }
+        }
 
         // Separate into truly orphaned (not referenced) and referenced.
         $truly_orphaned = array();
-        $referenced     = array();
-        $total_size     = 0;
+        $referenced_count = 0;
+        $total_size = 0;
 
         foreach ( $orphaned as $file ) {
-            if ( $file['referenced'] ) {
-                $referenced[] = $file;
+            if ( ! empty( $file['referenced'] ) ) {
+                $referenced_count++;
             } else {
                 $truly_orphaned[] = $file;
                 $total_size += $file['filesize'];
@@ -1316,11 +1429,17 @@ class UIF_Scanner {
 
         $total = count( $truly_orphaned );
 
+        // Store final results in a separate transient for pagination/deletion.
+        set_transient( 'uif_orphan_results', $truly_orphaned, HOUR_IN_SECONDS );
+
+        // Clean up working transient.
+        delete_transient( 'uif_orphan_files' );
+
         return array(
-            'files'      => array_slice( $truly_orphaned, $offset, $limit ),
-            'total'      => $total,
-            'total_size' => $total_size,
-            'referenced_count' => count( $referenced ),
+            'files'            => array_slice( $truly_orphaned, $offset, $limit ),
+            'total'            => $total,
+            'total_size'       => $total_size,
+            'referenced_count' => $referenced_count,
         );
     }
 
@@ -1368,94 +1487,4 @@ class UIF_Scanner {
         return $known;
     }
 
-    /**
-     * Check if orphaned files are referenced anywhere in the database.
-     * Uses the same chunk+strpos approach as the filename search.
-     *
-     * @param array $orphaned Array of orphaned file info arrays.
-     * @return array Same array with 'referenced' key added to each item.
-     */
-    private static function check_orphan_references( $orphaned ) {
-        if ( empty( $orphaned ) ) {
-            return $orphaned;
-        }
-
-        global $wpdb;
-
-        // Build filename lookup.
-        $filename_to_indices = array();
-        foreach ( $orphaned as $i => $file ) {
-            $orphaned[ $i ]['referenced'] = false;
-            $filename_to_indices[ $file['filename'] ][] = $i;
-        }
-
-        $filenames = array_keys( $filename_to_indices );
-
-        // Search post_content in chunks of 200 posts.
-        $post_ids = $wpdb->get_col(
-            "SELECT ID FROM {$wpdb->posts}
-             WHERE post_content != ''
-             AND post_status IN ('publish','draft','pending','private','future','inherit')"
-        );
-
-        if ( $post_ids ) {
-            $remaining = array_flip( $filenames );
-            $chunks = array_chunk( $post_ids, 200 );
-
-            foreach ( $chunks as $chunk ) {
-                if ( empty( $remaining ) ) {
-                    break;
-                }
-
-                $in   = implode( ',', array_map( 'intval', $chunk ) );
-                $rows = $wpdb->get_col( "SELECT post_content FROM {$wpdb->posts} WHERE ID IN ({$in})" );
-
-                if ( ! $rows ) {
-                    continue;
-                }
-
-                $blob = implode( "\n", $rows );
-                unset( $rows );
-
-                foreach ( $remaining as $filename => $v ) {
-                    if ( stripos( $blob, $filename ) !== false ) {
-                        // Mark all orphaned files with this filename as referenced.
-                        foreach ( $filename_to_indices[ $filename ] as $idx ) {
-                            $orphaned[ $idx ]['referenced'] = true;
-                        }
-                        unset( $remaining[ $filename ] );
-                    }
-                }
-
-                unset( $blob );
-            }
-        }
-
-        // Also check postmeta for remaining filenames (quick check with limited meta keys).
-        $still_remaining = array();
-        foreach ( $orphaned as $i => $file ) {
-            if ( ! $file['referenced'] ) {
-                $still_remaining[ $file['filename'] ] = $i;
-            }
-        }
-
-        if ( ! empty( $still_remaining ) ) {
-            foreach ( $still_remaining as $filename => $idx ) {
-                $esc = '%' . $wpdb->esc_like( $filename ) . '%';
-                $found = $wpdb->get_var( $wpdb->prepare(
-                    "SELECT 1 FROM {$wpdb->options}
-                     WHERE option_value LIKE %s
-                     AND option_name NOT LIKE '_transient%%'
-                     LIMIT 1",
-                    $esc
-                ) );
-
-                if ( $found ) {
-                    $orphaned[ $idx ]['referenced'] = true;
-                }
-            }
-        }
-
-        return $orphaned;
-    }
 }

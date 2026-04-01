@@ -14,7 +14,7 @@ class UIF_Admin {
         add_action( 'wp_ajax_uif_scan_finalize', array( __CLASS__, 'ajax_scan_finalize' ) );
         add_action( 'wp_ajax_uif_scan_batch', array( __CLASS__, 'ajax_scan_batch' ) );
         add_action( 'wp_ajax_uif_delete', array( __CLASS__, 'ajax_delete' ) );
-        add_action( 'wp_ajax_uif_orphan_scan', array( __CLASS__, 'ajax_orphan_scan' ) );
+        add_action( 'wp_ajax_uif_orphan_phase', array( __CLASS__, 'ajax_orphan_phase' ) );
         add_action( 'wp_ajax_uif_orphan_delete', array( __CLASS__, 'ajax_orphan_delete' ) );
         add_action( 'admin_init', array( __CLASS__, 'handle_csv_export' ) );
     }
@@ -183,6 +183,9 @@ class UIF_Admin {
                 <div class="uif-progress-header">
                     <span class="spinner is-active"></span>
                     <span id="uif-orphan-progress-text"><?php esc_html_e( 'Scanning uploads folder...', 'unused-image-finder' ); ?></span>
+                </div>
+                <div class="uif-progress-bar-wrap" style="margin-top:10px;">
+                    <div id="uif-orphan-progress-bar" class="uif-progress-bar" style="width:0%"></div>
                 </div>
             </div>
 
@@ -562,7 +565,13 @@ class UIF_Admin {
     /**
      * Scan the uploads folder for orphaned files.
      */
-    public static function ajax_orphan_scan() {
+    /**
+     * Phased orphan scan handler. Accepts a 'phase' parameter (1-3).
+     * Phase 1: Disk scan (find files not in DB)
+     * Phase 2: Check references in post_content
+     * Phase 3: Check references in wp_options & finalize results
+     */
+    public static function ajax_orphan_phase() {
         check_ajax_referer( 'uif_nonce', 'nonce' );
 
         if ( ! current_user_can( 'manage_options' ) ) {
@@ -572,13 +581,40 @@ class UIF_Admin {
         @set_time_limit( 300 );
         wp_raise_memory_limit( 'admin' );
 
-        $result = UIF_Scanner::get_orphaned_files( 0, 5000 ); // Get up to 5000 orphaned files.
+        $phase = isset( $_POST['phase'] ) ? intval( $_POST['phase'] ) : 0;
 
-        wp_send_json_success( array(
-            'files'      => $result['files'],
-            'total'      => $result['total'],
-            'total_size' => $result['total_size'],
-        ) );
+        switch ( $phase ) {
+            case 1:
+                $result = UIF_Scanner::orphan_scan_disk();
+                wp_send_json_success( array(
+                    'phase' => 1,
+                    'found' => $result['found'],
+                ) );
+                break;
+
+            case 2:
+                $result = UIF_Scanner::orphan_check_content();
+                wp_send_json_success( array(
+                    'phase'      => 2,
+                    'checked'    => $result['checked'],
+                    'referenced' => $result['referenced'],
+                ) );
+                break;
+
+            case 3:
+                $result = UIF_Scanner::orphan_check_options_and_finalize( 0, 5000 );
+                wp_send_json_success( array(
+                    'phase'            => 3,
+                    'files'            => $result['files'],
+                    'total'            => $result['total'],
+                    'total_size'       => $result['total_size'],
+                    'referenced_count' => $result['referenced_count'],
+                ) );
+                break;
+
+            default:
+                wp_send_json_error( 'Invalid phase.' );
+        }
     }
 
     /**
