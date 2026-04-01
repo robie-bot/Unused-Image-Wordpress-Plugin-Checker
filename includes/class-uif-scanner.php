@@ -646,6 +646,14 @@ class UIF_Scanner {
                 }
             }
 
+            // Catch any *bgimage* or *_image attributes on [us_*] shortcodes (flipbox, etc.).
+            // e.g. front_bgimage="8645", back_bgimage="8669"
+            if ( preg_match_all( '/\b\w*(?:bgimage|_image|_img)\w*=["\']?([\d,]+)["\']?/', $content, $m ) ) {
+                foreach ( $m[1] as $id_string ) {
+                    $ids = array_merge( $ids, explode( ',', $id_string ) );
+                }
+            }
+
             // Also catch WPBakery [vc_*] shortcodes inside Impreza layouts.
             if ( preg_match_all( '/\[vc_\w+[^\]]*\s(?:image|images|img_id|photo|include)=["\']?([\d,]+)["\']?/', $content, $m ) ) {
                 foreach ( $m[1] as $id_string ) {
