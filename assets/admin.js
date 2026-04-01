@@ -733,4 +733,183 @@
         });
     });
 
+    // ── Orphaned Files Scanner ────────────────────────────────
+
+    var orphanData = [];
+    var orphanSelectedPaths = {};
+
+    $('#uif-orphan-scan-btn').on('click', function () {
+        var btn = $(this);
+        btn.prop('disabled', true);
+        $('#uif-orphan-progress').show();
+        $('#uif-orphan-results').hide();
+        $('#uif-orphan-tbody').empty();
+        orphanData = [];
+        orphanSelectedPaths = {};
+
+        $.ajax({
+            url: uif.ajax_url,
+            type: 'POST',
+            timeout: 120000,
+            data: {
+                action: 'uif_orphan_scan',
+                nonce:  uif.nonce
+            }
+        })
+        .done(function (res) {
+            btn.prop('disabled', false);
+            $('#uif-orphan-progress').hide();
+            $('#uif-orphan-results').show();
+
+            if (!res.success) {
+                showNotice(res.data || 'Orphan scan failed.', 'error');
+                return;
+            }
+
+            orphanData = res.data.files;
+            $('#uif-orphan-count').text(res.data.total);
+            $('#uif-orphan-size').text(formatSize(res.data.total_size));
+
+            if (orphanData.length > 0) {
+                $('#uif-orphan-table-wrap').show();
+                $('#uif-orphan-empty').hide();
+                renderOrphanTable();
+            } else {
+                $('#uif-orphan-table-wrap').hide();
+                $('#uif-orphan-empty').show();
+            }
+        })
+        .fail(function () {
+            btn.prop('disabled', false);
+            $('#uif-orphan-progress').hide();
+            showNotice('Orphan scan failed. Server may have timed out.', 'error');
+        });
+    });
+
+    function renderOrphanTable() {
+        var html = '';
+        for (var i = 0; i < orphanData.length; i++) {
+            var f = orphanData[i];
+            var safePath = escAttr(f.path);
+            var safeUrl  = escAttr(f.url);
+            var safeName = $('<span>').text(f.filename).html();
+            html += '<tr data-path="' + safePath + '">' +
+                '<td><input type="checkbox" class="uif-orphan-cb" value="' + safePath + '" /></td>' +
+                '<td><img class="uif-thumb" src="' + safeUrl + '" alt="" loading="lazy" onerror="this.style.display=\'none\'" /></td>' +
+                '<td><span class="uif-filename">' + $('<span>').text(f.path).html() + '</span></td>' +
+                '<td>' + formatSize(f.filesize) + '</td>' +
+                '<td>' + $('<span>').text(f.modified).html() + '</td>' +
+                '</tr>';
+        }
+        $('#uif-orphan-tbody').html(html);
+    }
+
+    // Select all orphan checkboxes.
+    $(document).on('change', '#uif-orphan-select-all, #uif-orphan-select-all-top', function () {
+        var checked = $(this).prop('checked');
+        $('#uif-orphan-select-all, #uif-orphan-select-all-top').prop('checked', checked);
+        $('#uif-orphan-tbody .uif-orphan-cb').prop('checked', checked);
+        orphanSelectedPaths = {};
+        if (checked) {
+            for (var i = 0; i < orphanData.length; i++) {
+                orphanSelectedPaths[orphanData[i].path] = true;
+            }
+        }
+        updateOrphanSelectedUI();
+    });
+
+    $(document).on('change', '.uif-orphan-cb', function () {
+        var path = $(this).val();
+        if ($(this).prop('checked')) {
+            orphanSelectedPaths[path] = true;
+        } else {
+            delete orphanSelectedPaths[path];
+        }
+        updateOrphanSelectedUI();
+    });
+
+    function orphanSelectedCount() {
+        var count = 0;
+        for (var k in orphanSelectedPaths) {
+            if (orphanSelectedPaths.hasOwnProperty(k) && orphanSelectedPaths[k]) count++;
+        }
+        return count;
+    }
+
+    function updateOrphanSelectedUI() {
+        var count = orphanSelectedCount();
+        $('#uif-orphan-selected-count').text(count > 0 ? count + ' selected' : '');
+        $('#uif-orphan-delete-btn').prop('disabled', count === 0);
+    }
+
+    // Delete selected orphaned files.
+    $('#uif-orphan-delete-btn').on('click', function () {
+        var paths = [];
+        for (var k in orphanSelectedPaths) {
+            if (orphanSelectedPaths.hasOwnProperty(k) && orphanSelectedPaths[k]) {
+                paths.push(k);
+            }
+        }
+
+        if (paths.length === 0) {
+            showNotice('No files selected.', 'warning');
+            return;
+        }
+
+        if (!confirm('Are you sure you want to permanently delete ' + paths.length + ' orphaned file(s) from disk? This cannot be undone.')) {
+            return;
+        }
+
+        var btn = $('#uif-orphan-delete-btn');
+        btn.prop('disabled', true).text('Deleting...');
+
+        // Delete in chunks of 50.
+        var chunkSize = 50;
+        var totalDeleted = 0;
+
+        function deleteOrphanChunk(startIdx) {
+            var chunk = paths.slice(startIdx, startIdx + chunkSize);
+            if (chunk.length === 0) {
+                showNotice(totalDeleted + ' orphaned file(s) deleted.', 'success');
+                // Remove deleted from data.
+                var deletedSet = {};
+                for (var i = 0; i < paths.length; i++) { deletedSet[paths[i]] = true; }
+                orphanData = orphanData.filter(function (f) { return !deletedSet[f.path]; });
+                orphanSelectedPaths = {};
+                $('#uif-orphan-count').text(orphanData.length);
+                if (orphanData.length === 0) {
+                    $('#uif-orphan-table-wrap').hide();
+                    $('#uif-orphan-empty').show();
+                } else {
+                    renderOrphanTable();
+                }
+                btn.prop('disabled', false).text('Delete Selected Files');
+                updateOrphanSelectedUI();
+                return;
+            }
+
+            $.post(uif.ajax_url, {
+                action: 'uif_orphan_delete',
+                nonce:  uif.nonce,
+                paths:  chunk
+            })
+            .done(function (res) {
+                if (res.success) {
+                    totalDeleted += res.data.deleted;
+                    btn.text('Deleting... ' + totalDeleted + '/' + paths.length);
+                    deleteOrphanChunk(startIdx + chunkSize);
+                } else {
+                    showNotice('Error deleting files: ' + (res.data || 'Unknown error'), 'error');
+                    btn.prop('disabled', false).text('Delete Selected Files');
+                }
+            })
+            .fail(function () {
+                showNotice('Server error while deleting orphaned files.', 'error');
+                btn.prop('disabled', false).text('Delete Selected Files');
+            });
+        }
+
+        deleteOrphanChunk(0);
+    });
+
 })(jQuery);

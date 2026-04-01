@@ -14,6 +14,8 @@ class UIF_Admin {
         add_action( 'wp_ajax_uif_scan_finalize', array( __CLASS__, 'ajax_scan_finalize' ) );
         add_action( 'wp_ajax_uif_scan_batch', array( __CLASS__, 'ajax_scan_batch' ) );
         add_action( 'wp_ajax_uif_delete', array( __CLASS__, 'ajax_delete' ) );
+        add_action( 'wp_ajax_uif_orphan_scan', array( __CLASS__, 'ajax_orphan_scan' ) );
+        add_action( 'wp_ajax_uif_orphan_delete', array( __CLASS__, 'ajax_orphan_delete' ) );
         add_action( 'admin_init', array( __CLASS__, 'handle_csv_export' ) );
     }
 
@@ -166,6 +168,66 @@ class UIF_Admin {
             </div>
 
             <div id="uif-notice" class="notice" style="display:none;"></div>
+
+            <hr style="margin:40px 0 30px;" />
+
+            <h2><?php esc_html_e( 'Orphaned Files (Disk Scan)', 'unused-image-finder' ); ?></h2>
+            <div class="uif-intro">
+                <p><?php esc_html_e( 'Scan the /wp-content/uploads/ folder for image files that exist on disk but are NOT registered in the WordPress media library. These are files uploaded via FTP, leftover thumbnails from deleted images, or optimizer artifacts.', 'unused-image-finder' ); ?></p>
+                <button id="uif-orphan-scan-btn" class="button button-secondary">
+                    <?php esc_html_e( 'Scan for Orphaned Files', 'unused-image-finder' ); ?>
+                </button>
+            </div>
+
+            <div id="uif-orphan-progress" style="display:none;">
+                <div class="uif-progress-header">
+                    <span class="spinner is-active"></span>
+                    <span id="uif-orphan-progress-text"><?php esc_html_e( 'Scanning uploads folder...', 'unused-image-finder' ); ?></span>
+                </div>
+            </div>
+
+            <div id="uif-orphan-results" style="display:none;">
+                <div class="uif-stats">
+                    <div class="uif-stat-card uif-stat-warning">
+                        <span class="uif-stat-number" id="uif-orphan-count">0</span>
+                        <span class="uif-stat-label"><?php esc_html_e( 'Orphaned Files', 'unused-image-finder' ); ?></span>
+                    </div>
+                    <div class="uif-stat-card">
+                        <span class="uif-stat-number" id="uif-orphan-size">0 MB</span>
+                        <span class="uif-stat-label"><?php esc_html_e( 'Disk Space', 'unused-image-finder' ); ?></span>
+                    </div>
+                </div>
+
+                <div id="uif-orphan-table-wrap" style="display:none;">
+                    <div class="uif-table-actions">
+                        <label>
+                            <input type="checkbox" id="uif-orphan-select-all" />
+                            <?php esc_html_e( 'Select All', 'unused-image-finder' ); ?>
+                        </label>
+                        <button id="uif-orphan-delete-btn" class="button button-secondary" disabled>
+                            <?php esc_html_e( 'Delete Selected Files', 'unused-image-finder' ); ?>
+                        </button>
+                        <span id="uif-orphan-selected-count"></span>
+                    </div>
+
+                    <table class="wp-list-table widefat fixed striped" id="uif-orphan-table">
+                        <thead>
+                            <tr>
+                                <th class="uif-col-cb"><input type="checkbox" id="uif-orphan-select-all-top" /></th>
+                                <th class="uif-col-thumb"><?php esc_html_e( 'Preview', 'unused-image-finder' ); ?></th>
+                                <th class="uif-col-title"><?php esc_html_e( 'File Path', 'unused-image-finder' ); ?></th>
+                                <th class="uif-col-size"><?php esc_html_e( 'Size', 'unused-image-finder' ); ?></th>
+                                <th class="uif-col-date"><?php esc_html_e( 'Modified', 'unused-image-finder' ); ?></th>
+                            </tr>
+                        </thead>
+                        <tbody id="uif-orphan-tbody"></tbody>
+                    </table>
+                </div>
+
+                <div id="uif-orphan-empty" style="display:none;">
+                    <p class="uif-success"><?php esc_html_e( 'No orphaned files found. Your uploads folder is clean!', 'unused-image-finder' ); ?></p>
+                </div>
+            </div>
         </div>
         <?php
     }
@@ -494,6 +556,79 @@ class UIF_Admin {
         wp_send_json_success( array(
             'deleted' => $deleted,
             'total'   => count( $ids ),
+        ) );
+    }
+
+    /**
+     * Scan the uploads folder for orphaned files.
+     */
+    public static function ajax_orphan_scan() {
+        check_ajax_referer( 'uif_nonce', 'nonce' );
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Unauthorized' );
+        }
+
+        @set_time_limit( 300 );
+        wp_raise_memory_limit( 'admin' );
+
+        $result = UIF_Scanner::get_orphaned_files( 0, 5000 ); // Get up to 5000 orphaned files.
+
+        wp_send_json_success( array(
+            'files'      => $result['files'],
+            'total'      => $result['total'],
+            'total_size' => $result['total_size'],
+        ) );
+    }
+
+    /**
+     * Delete orphaned files from disk (not WordPress attachments — just raw files).
+     */
+    public static function ajax_orphan_delete() {
+        check_ajax_referer( 'uif_nonce', 'nonce' );
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Unauthorized' );
+        }
+
+        $paths = isset( $_POST['paths'] ) ? (array) $_POST['paths'] : array();
+
+        if ( empty( $paths ) ) {
+            wp_send_json_error( 'No files selected.' );
+        }
+
+        $upload_dir = wp_get_upload_dir();
+        $base_dir   = str_replace( '\\', '/', $upload_dir['basedir'] );
+        $deleted    = 0;
+
+        foreach ( $paths as $relative_path ) {
+            // Sanitize: no directory traversal.
+            $relative_path = str_replace( '\\', '/', $relative_path );
+            if ( strpos( $relative_path, '..' ) !== false ) {
+                continue;
+            }
+
+            $full_path = $base_dir . '/' . $relative_path;
+
+            // Safety: must be inside the uploads directory.
+            if ( strpos( realpath( $full_path ), realpath( $base_dir ) ) !== 0 ) {
+                continue;
+            }
+
+            if ( file_exists( $full_path ) && is_file( $full_path ) && wp_delete_file( $full_path ) ) {
+                $deleted++;
+            } elseif ( file_exists( $full_path ) && is_file( $full_path ) ) {
+                // wp_delete_file doesn't return a value, check if gone.
+                wp_delete_file( $full_path );
+                if ( ! file_exists( $full_path ) ) {
+                    $deleted++;
+                }
+            }
+        }
+
+        wp_send_json_success( array(
+            'deleted' => $deleted,
+            'total'   => count( $paths ),
         ) );
     }
 }

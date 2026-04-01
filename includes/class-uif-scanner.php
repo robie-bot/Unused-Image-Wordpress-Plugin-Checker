@@ -1203,4 +1203,149 @@ class UIF_Scanner {
 
         return $id ?: 0;
     }
+
+    /**
+     * Scan the /wp-content/uploads/ folder on disk and find orphaned image files
+     * that exist on disk but are NOT registered in the WordPress database.
+     *
+     * These are files uploaded via FTP, leftover thumbnails, optimizer backups, etc.
+     *
+     * @param int $offset  Start index for pagination.
+     * @param int $limit   How many to return.
+     * @return array {
+     *     @type array  $files       Array of orphaned file info.
+     *     @type int    $total       Total orphaned files found.
+     *     @type int    $total_size  Total size of orphaned files.
+     * }
+     */
+    public static function get_orphaned_files( $offset = 0, $limit = 50 ) {
+        $upload_dir = wp_get_upload_dir();
+        $base_dir   = $upload_dir['basedir'];
+        $base_url   = $upload_dir['baseurl'];
+
+        if ( ! is_dir( $base_dir ) ) {
+            return array( 'files' => array(), 'total' => 0, 'total_size' => 0 );
+        }
+
+        // Image extensions to look for.
+        $image_exts = array( 'jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'avif', 'bmp', 'ico', 'tiff', 'tif' );
+
+        // Build a set of ALL known files from the database (main files + thumbnails).
+        $known_files = self::get_all_known_files();
+
+        // Recursively scan the uploads directory.
+        $orphaned = array();
+        $total_size = 0;
+
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator( $base_dir, RecursiveDirectoryIterator::SKIP_DOTS ),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+
+        foreach ( $iterator as $file ) {
+            if ( ! $file->isFile() ) {
+                continue;
+            }
+
+            $ext = strtolower( pathinfo( $file->getFilename(), PATHINFO_EXTENSION ) );
+            if ( ! in_array( $ext, $image_exts, true ) ) {
+                continue;
+            }
+
+            $full_path = $file->getPathname();
+            // Normalize path separators for Windows.
+            $full_path = str_replace( '\\', '/', $full_path );
+            $base_norm = str_replace( '\\', '/', $base_dir );
+
+            // Get the relative path from uploads base.
+            $relative = ltrim( str_replace( $base_norm, '', $full_path ), '/' );
+
+            // Skip if this file is known to WordPress.
+            if ( isset( $known_files[ $relative ] ) ) {
+                continue;
+            }
+
+            // Skip common non-media directories.
+            $skip_dirs = array( 'backup', 'backups', 'imagify-backup', 'cache', 'wpcf7_uploads', 'wc-logs', 'elementor/css', 'elementor/thumbs' );
+            $skip = false;
+            foreach ( $skip_dirs as $dir ) {
+                if ( strpos( $relative, $dir ) === 0 ) {
+                    $skip = true;
+                    break;
+                }
+            }
+            if ( $skip ) {
+                continue;
+            }
+
+            $size = $file->getSize();
+            $total_size += $size;
+
+            $orphaned[] = array(
+                'path'      => $relative,
+                'url'       => $base_url . '/' . $relative,
+                'filename'  => $file->getFilename(),
+                'filesize'  => $size,
+                'modified'  => gmdate( 'Y-m-d', $file->getMTime() ),
+                'full_path' => $full_path,
+            );
+        }
+
+        // Sort by modified date descending.
+        usort( $orphaned, function ( $a, $b ) {
+            return strcmp( $b['modified'], $a['modified'] );
+        } );
+
+        $total = count( $orphaned );
+
+        return array(
+            'files'      => array_slice( $orphaned, $offset, $limit ),
+            'total'      => $total,
+            'total_size' => $total_size,
+        );
+    }
+
+    /**
+     * Build a set of all file paths known to WordPress (main files + all thumbnail sizes).
+     *
+     * @return array Associative array of relative_path => true.
+     */
+    private static function get_all_known_files() {
+        global $wpdb;
+        $known = array();
+
+        // Get all attached files (relative paths like "2024/08/photo.jpg").
+        $rows = $wpdb->get_results(
+            "SELECT pm.meta_value AS filepath, pm2.meta_value AS metadata
+             FROM {$wpdb->postmeta} pm
+             INNER JOIN {$wpdb->posts} p ON p.ID = pm.post_id AND p.post_type = 'attachment'
+             LEFT JOIN {$wpdb->postmeta} pm2 ON pm2.post_id = pm.post_id AND pm2.meta_key = '_wp_attachment_metadata'
+             WHERE pm.meta_key = '_wp_attached_file'"
+        );
+
+        foreach ( $rows as $row ) {
+            // Main file.
+            $known[ $row->filepath ] = true;
+
+            // Thumbnail sizes from metadata.
+            if ( ! empty( $row->metadata ) ) {
+                $meta = maybe_unserialize( $row->metadata );
+                if ( is_array( $meta ) && ! empty( $meta['sizes'] ) ) {
+                    $dir = dirname( $row->filepath );
+                    if ( '.' === $dir ) {
+                        $dir = '';
+                    } else {
+                        $dir .= '/';
+                    }
+                    foreach ( $meta['sizes'] as $size_info ) {
+                        if ( ! empty( $size_info['file'] ) ) {
+                            $known[ $dir . $size_info['file'] ] = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        return $known;
+    }
 }
