@@ -871,9 +871,11 @@ class UIF_Scanner {
         $remaining = array_flip( $filenames ); // filename => anything (fast isset check)
 
         // Get all post IDs with non-empty content (fast indexed query).
+        // IMPORTANT: Exclude revisions (post_type = 'revision') which contain old/stale content.
+        // Images removed from a page but still in a revision would be false positives.
         $post_ids = $wpdb->get_col(
             "SELECT ID FROM {$wpdb->posts}
-             WHERE post_type != 'attachment'
+             WHERE post_type NOT IN ('attachment','revision')
              AND post_status IN ('publish','draft','pending','private','future','inherit')
              AND post_content != ''"
         );
@@ -904,10 +906,19 @@ class UIF_Scanner {
             unset( $rows );
 
             // Check each remaining filename.
+            // Use stricter matching: filename must appear in a URL-like context
+            // (preceded by /, =, (, or space) to avoid false positives from
+            // incidental text matches. Fall back to plain stripos only for
+            // filenames with image extensions.
             foreach ( $remaining as $filename => $v ) {
                 if ( stripos( $blob, $filename ) !== false ) {
-                    $found[] = $filename;
-                    unset( $remaining[ $filename ] );
+                    // Verify it's a real reference, not incidental text.
+                    // Check for URL context: /filename, "filename, 'filename, (filename, =filename
+                    $esc = preg_quote( $filename, '/' );
+                    if ( preg_match( '/[\/="\'(\s]' . $esc . '/i', $blob ) ) {
+                        $found[] = $filename;
+                        unset( $remaining[ $filename ] );
+                    }
                 }
             }
 
@@ -1322,10 +1333,11 @@ class UIF_Scanner {
         $remaining = array_flip( $filenames );
         $ref_count = 0;
 
-        // Search post_content in chunks of 200 posts.
+        // Search post_content in chunks of 200 posts (exclude revisions).
         $post_ids = $wpdb->get_col(
             "SELECT ID FROM {$wpdb->posts}
              WHERE post_content != ''
+             AND post_type != 'revision'
              AND post_status IN ('publish','draft','pending','private','future','inherit')"
         );
 
