@@ -975,33 +975,12 @@ class UIF_Scanner {
         global $wpdb;
         $ids = array();
 
-        // 1. Imagify / optimizer meta: any image that has been optimized should
-        //    be protected — the attachment IS the original backup.
-        //    These are fast indexed lookups on meta_key.
-        $imagify_ids = $wpdb->get_col(
-            "SELECT DISTINCT post_id FROM {$wpdb->postmeta}
-             WHERE meta_key IN ('_imagify_data', '_imagify_status')
-             AND meta_value != ''
-             AND meta_value != 'a:0:{}'"
-        );
+        // NOTE: We intentionally do NOT mark all Imagify-optimized images as "used."
+        // Imagify optimizes everything in the media library, including unused images.
+        // Only protect the original when its WebP/AVIF variant is actually referenced.
 
-        if ( $imagify_ids ) {
-            $ids = array_merge( $ids, $imagify_ids );
-        }
-
-        // 2. WP core backup sizes (used by Imagify, EWWW, ShortPixel, etc.)
-        $backup_ids = $wpdb->get_col(
-            "SELECT DISTINCT post_id FROM {$wpdb->postmeta}
-             WHERE meta_key = '_wp_attachment_backup_sizes'
-             AND meta_value != ''"
-        );
-
-        if ( $backup_ids ) {
-            $ids = array_merge( $ids, $backup_ids );
-        }
-
-        // 3. Reverse lookup: if a .webp/.avif version of an image filename is
-        //    found in post_content, mark the original as used.
+        // Reverse lookup: if a .webp/.avif version of an image filename is
+        // found in post_content, mark the original as used.
         $used_set = array_flip( array_unique( array_filter( array_map( 'absint', $used ) ) ) );
 
         $all_meta = $wpdb->get_results(
