@@ -16,6 +16,7 @@ class UIF_Admin {
         add_action( 'wp_ajax_uif_delete', array( __CLASS__, 'ajax_delete' ) );
         add_action( 'wp_ajax_uif_orphan_phase', array( __CLASS__, 'ajax_orphan_phase' ) );
         add_action( 'wp_ajax_uif_orphan_delete', array( __CLASS__, 'ajax_orphan_delete' ) );
+        add_action( 'wp_ajax_uif_broken_scan', array( __CLASS__, 'ajax_broken_scan' ) );
         add_action( 'admin_init', array( __CLASS__, 'handle_csv_export' ) );
 
         // Media Library integration — "Unused" filter tab.
@@ -333,6 +334,48 @@ class UIF_Admin {
 
                 <div id="uif-orphan-empty" style="display:none;">
                     <p class="uif-success"><?php esc_html_e( 'No orphaned files found. Your uploads folder is clean!', 'unused-image-finder' ); ?></p>
+                </div>
+            </div>
+
+            <hr style="margin:30px 0;" />
+
+            <h2><?php esc_html_e( 'Broken Image References', 'unused-image-finder' ); ?></h2>
+            <div class="uif-intro">
+                <p><?php esc_html_e( 'Scan your posts and pages for image references that point to files no longer in the media library or on disk. This helps identify images that were deleted but are still referenced in your content.', 'unused-image-finder' ); ?></p>
+                <button id="uif-broken-scan-btn" class="button button-secondary">
+                    <?php esc_html_e( 'Scan for Broken References', 'unused-image-finder' ); ?>
+                </button>
+            </div>
+
+            <div id="uif-broken-progress" style="display:none;">
+                <div class="uif-progress-header">
+                    <span class="spinner is-active"></span>
+                    <span><?php esc_html_e( 'Scanning database for broken image references...', 'unused-image-finder' ); ?></span>
+                </div>
+            </div>
+
+            <div id="uif-broken-results" style="display:none;">
+                <div class="uif-stats">
+                    <div class="uif-stat-card uif-stat-warning">
+                        <span class="uif-stat-number" id="uif-broken-count">0</span>
+                        <span class="uif-stat-label"><?php esc_html_e( 'Broken References', 'unused-image-finder' ); ?></span>
+                    </div>
+                </div>
+
+                <div id="uif-broken-table-wrap" style="display:none;">
+                    <table class="wp-list-table widefat fixed striped" id="uif-broken-table">
+                        <thead>
+                            <tr>
+                                <th class="uif-col-title"><?php esc_html_e( 'Missing Image', 'unused-image-finder' ); ?></th>
+                                <th><?php esc_html_e( 'Referenced In', 'unused-image-finder' ); ?></th>
+                            </tr>
+                        </thead>
+                        <tbody id="uif-broken-tbody"></tbody>
+                    </table>
+                </div>
+
+                <div id="uif-broken-empty" style="display:none;">
+                    <p class="uif-success"><?php esc_html_e( 'No broken image references found. All images in your content exist!', 'unused-image-finder' ); ?></p>
                 </div>
             </div>
         </div>
@@ -772,6 +815,28 @@ class UIF_Admin {
         wp_send_json_success( array(
             'deleted' => $deleted,
             'total'   => count( $paths ),
+        ) );
+    }
+
+    /**
+     * Scan for broken image references — images referenced in content but
+     * no longer in the media library or on disk.
+     */
+    public static function ajax_broken_scan() {
+        check_ajax_referer( 'uif_nonce', 'nonce' );
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Unauthorized' );
+        }
+
+        @set_time_limit( 300 );
+        wp_raise_memory_limit( 'admin' );
+
+        $result = UIF_Scanner::scan_broken_references();
+
+        wp_send_json_success( array(
+            'references' => $result['references'],
+            'total'      => $result['total'],
         ) );
     }
 }

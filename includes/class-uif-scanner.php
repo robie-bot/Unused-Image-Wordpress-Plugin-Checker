@@ -1486,4 +1486,124 @@ class UIF_Scanner {
         return $known;
     }
 
+    /**
+     * Scan post_content for image URLs that point to /wp-content/uploads/
+     * but the file no longer exists on disk or in the media library.
+     *
+     * Returns a list of broken references with the URL and which posts reference them.
+     *
+     * @return array {
+     *     @type array $references Array of broken reference info.
+     *     @type int   $total      Total broken references found.
+     * }
+     */
+    public static function scan_broken_references() {
+        global $wpdb;
+
+        $upload_dir       = wp_get_upload_dir();
+        $base_dir         = $upload_dir['basedir'];
+        $base_url         = $upload_dir['baseurl'];
+        $upload_base_path = wp_parse_url( $base_url, PHP_URL_PATH ); // e.g. /wp-content/uploads
+
+        // Build a set of all known attachment URLs for fast lookup.
+        $known_urls = array();
+        $attachments = $wpdb->get_results(
+            "SELECT p.ID, pm.meta_value AS filepath
+             FROM {$wpdb->posts} p
+             INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id AND pm.meta_key = '_wp_attached_file'
+             WHERE p.post_type = 'attachment'
+             AND p.post_status = 'inherit'"
+        );
+
+        foreach ( $attachments as $att ) {
+            // Store both the relative path and common URL patterns.
+            $known_urls[ $att->filepath ] = (int) $att->ID;
+            $basename = basename( $att->filepath );
+            $known_urls[ $basename ] = (int) $att->ID;
+        }
+
+        // Get all published post content.
+        $posts = $wpdb->get_results(
+            "SELECT ID, post_title, post_type, post_content FROM {$wpdb->posts}
+             WHERE post_type NOT IN ('attachment','revision')
+             AND post_status IN ('publish','draft','pending','private','future')
+             AND post_content LIKE '%" . $wpdb->esc_like( $upload_base_path ) . "%'"
+        );
+
+        $broken     = array();
+        $seen_urls  = array();
+        $upload_re  = preg_quote( $upload_base_path, '/' );
+
+        // Image extensions to look for.
+        $img_ext_re = '\.(?:jpg|jpeg|png|gif|svg|webp|avif|bmp|ico|tiff|tif)';
+
+        foreach ( $posts as $post ) {
+            // Find all upload URLs in this post's content.
+            if ( ! preg_match_all( '/(?:https?:\/\/[^\s"\'<>\]\[)]*)?(' . $upload_re . '\/[^\s"\'<>\]\[)]+' . $img_ext_re . ')/i', $post->post_content, $m ) ) {
+                continue;
+            }
+
+            foreach ( $m[1] as $rel_url ) {
+                // Normalize: remove size suffix for lookup.
+                $clean = preg_replace( '/-\d+x\d+(?=\.\w+$)/', '', $rel_url );
+
+                // Extract just the path after /wp-content/uploads/.
+                $rel_path = preg_replace( '/^.*' . $upload_re . '\//', '', $clean );
+
+                // Check if this image exists in the media library.
+                if ( isset( $known_urls[ $rel_path ] ) || isset( $known_urls[ basename( $rel_path ) ] ) ) {
+                    continue; // Image exists in DB — not broken.
+                }
+
+                // Check if the file exists on disk.
+                $full_path = $base_dir . '/' . $rel_path;
+                if ( file_exists( $full_path ) ) {
+                    continue; // File exists on disk — not broken.
+                }
+
+                // Also check the original URL (with size suffix).
+                $orig_rel_path = preg_replace( '/^.*' . $upload_re . '\//', '', $rel_url );
+                $orig_full     = $base_dir . '/' . $orig_rel_path;
+                if ( file_exists( $orig_full ) ) {
+                    continue;
+                }
+
+                // This is a broken reference.
+                $url_key = $rel_url;
+                if ( ! isset( $seen_urls[ $url_key ] ) ) {
+                    $seen_urls[ $url_key ] = count( $broken );
+                    $broken[] = array(
+                        'url'       => $base_url . preg_replace( '/^.*' . $upload_re . '/', '', $rel_url ),
+                        'path'      => $rel_url,
+                        'filename'  => basename( $rel_url ),
+                        'posts'     => array(),
+                    );
+                }
+
+                $idx = $seen_urls[ $url_key ];
+                // Avoid duplicate post entries.
+                $already = false;
+                foreach ( $broken[ $idx ]['posts'] as $p ) {
+                    if ( $p['id'] === (int) $post->ID ) {
+                        $already = true;
+                        break;
+                    }
+                }
+                if ( ! $already ) {
+                    $broken[ $idx ]['posts'][] = array(
+                        'id'    => (int) $post->ID,
+                        'title' => $post->post_title,
+                        'type'  => $post->post_type,
+                        'edit'  => admin_url( 'post.php?post=' . $post->ID . '&action=edit' ),
+                    );
+                }
+            }
+        }
+
+        return array(
+            'references' => $broken,
+            'total'      => count( $broken ),
+        );
+    }
+
 }

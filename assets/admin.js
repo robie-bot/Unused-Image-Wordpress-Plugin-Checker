@@ -963,4 +963,68 @@
         deleteOrphanChunk(0);
     });
 
+    // ========== Broken References Scanner ==========
+
+    $('#uif-broken-scan-btn').on('click', function () {
+        var btn = $(this);
+        btn.prop('disabled', true);
+        $('#uif-broken-progress').show();
+        $('#uif-broken-results').hide();
+        $('#uif-broken-tbody').empty();
+
+        $.ajax({
+            url: uif.ajax_url,
+            type: 'POST',
+            timeout: 300000,
+            data: {
+                action: 'uif_broken_scan',
+                nonce:  uif.nonce
+            }
+        })
+        .done(function (res) {
+            btn.prop('disabled', false);
+            $('#uif-broken-progress').hide();
+            $('#uif-broken-results').show();
+
+            if (!res.success) {
+                showNotice(res.data || 'Broken reference scan failed.', 'error');
+                return;
+            }
+
+            var refs = res.data.references;
+            $('#uif-broken-count').text(res.data.total);
+
+            if (refs.length > 0) {
+                $('#uif-broken-table-wrap').show();
+                $('#uif-broken-empty').hide();
+                var html = '';
+                for (var i = 0; i < refs.length; i++) {
+                    var r = refs[i];
+                    var safeName = $('<span>').text(r.filename).html();
+                    var safePath = $('<span>').text(r.path).html();
+                    var postLinks = [];
+                    for (var j = 0; j < r.posts.length; j++) {
+                        var p = r.posts[j];
+                        var safeTitle = $('<span>').text(p.title).html();
+                        var safeType = $('<span>').text(p.type).html();
+                        postLinks.push('<a href="' + escAttr(p.edit) + '" target="_blank">' + safeTitle + '</a> <small>(' + safeType + ')</small>');
+                    }
+                    html += '<tr>' +
+                        '<td><span class="uif-filename" style="color:#d63638;">' + safeName + '</span><br><small>' + safePath + '</small></td>' +
+                        '<td>' + postLinks.join('<br>') + '</td>' +
+                        '</tr>';
+                }
+                $('#uif-broken-tbody').html(html);
+            } else {
+                $('#uif-broken-table-wrap').hide();
+                $('#uif-broken-empty').show();
+            }
+        })
+        .fail(function () {
+            btn.prop('disabled', false);
+            $('#uif-broken-progress').hide();
+            showNotice('Broken reference scan failed. Server may have timed out.', 'error');
+        });
+    });
+
 })(jQuery);
