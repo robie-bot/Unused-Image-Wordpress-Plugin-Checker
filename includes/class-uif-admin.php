@@ -17,6 +17,8 @@ class UIF_Admin {
         add_action( 'wp_ajax_uif_orphan_phase', array( __CLASS__, 'ajax_orphan_phase' ) );
         add_action( 'wp_ajax_uif_orphan_delete', array( __CLASS__, 'ajax_orphan_delete' ) );
         add_action( 'wp_ajax_uif_broken_scan', array( __CLASS__, 'ajax_broken_scan' ) );
+        add_action( 'wp_ajax_uif_sync_scan', array( __CLASS__, 'ajax_sync_scan' ) );
+        add_action( 'wp_ajax_uif_sync_import', array( __CLASS__, 'ajax_sync_import' ) );
         add_action( 'admin_init', array( __CLASS__, 'handle_csv_export' ) );
 
         // Media Library integration — "Unused" filter tab.
@@ -376,6 +378,61 @@ class UIF_Admin {
 
                 <div id="uif-broken-empty" style="display:none;">
                     <p class="uif-success"><?php esc_html_e( 'No broken image references found. All images in your content exist!', 'unused-image-finder' ); ?></p>
+                </div>
+            </div>
+
+            <hr style="margin:30px 0;" />
+
+            <h2><?php esc_html_e( 'Sync Media Library', 'unused-image-finder' ); ?></h2>
+            <div class="uif-intro">
+                <p><?php esc_html_e( 'Scan /wp-content/uploads/ for image files that exist on disk but are NOT registered in the WordPress media library. You can then import them to make them visible in the Media Library.', 'unused-image-finder' ); ?></p>
+                <button id="uif-sync-scan-btn" class="button button-secondary">
+                    <?php esc_html_e( 'Scan for Unregistered Files', 'unused-image-finder' ); ?>
+                </button>
+            </div>
+
+            <div id="uif-sync-progress" style="display:none;">
+                <div class="uif-progress-header">
+                    <span class="spinner is-active"></span>
+                    <span id="uif-sync-progress-text"><?php esc_html_e( 'Scanning uploads folder...', 'unused-image-finder' ); ?></span>
+                </div>
+            </div>
+
+            <div id="uif-sync-results" style="display:none;">
+                <div class="uif-stats">
+                    <div class="uif-stat-card uif-stat-warning">
+                        <span class="uif-stat-number" id="uif-sync-count">0</span>
+                        <span class="uif-stat-label"><?php esc_html_e( 'Unregistered Files', 'unused-image-finder' ); ?></span>
+                    </div>
+                </div>
+
+                <div id="uif-sync-table-wrap" style="display:none;">
+                    <div class="uif-table-actions">
+                        <label>
+                            <input type="checkbox" id="uif-sync-select-all" />
+                            <?php esc_html_e( 'Select All', 'unused-image-finder' ); ?>
+                        </label>
+                        <button id="uif-sync-import-btn" class="button button-primary" disabled>
+                            <?php esc_html_e( 'Import Selected to Media Library', 'unused-image-finder' ); ?>
+                        </button>
+                        <span id="uif-sync-selected-count"></span>
+                    </div>
+
+                    <table class="wp-list-table widefat fixed striped" id="uif-sync-table">
+                        <thead>
+                            <tr>
+                                <th class="uif-col-cb"><input type="checkbox" id="uif-sync-select-all-top" /></th>
+                                <th class="uif-col-thumb"><?php esc_html_e( 'Preview', 'unused-image-finder' ); ?></th>
+                                <th class="uif-col-title"><?php esc_html_e( 'File Path', 'unused-image-finder' ); ?></th>
+                                <th class="uif-col-size"><?php esc_html_e( 'Size', 'unused-image-finder' ); ?></th>
+                            </tr>
+                        </thead>
+                        <tbody id="uif-sync-tbody"></tbody>
+                    </table>
+                </div>
+
+                <div id="uif-sync-empty" style="display:none;">
+                    <p class="uif-success"><?php esc_html_e( 'All files in uploads are registered in the media library!', 'unused-image-finder' ); ?></p>
                 </div>
             </div>
         </div>
@@ -815,6 +872,66 @@ class UIF_Admin {
         wp_send_json_success( array(
             'deleted' => $deleted,
             'total'   => count( $paths ),
+        ) );
+    }
+
+    /**
+     * Scan uploads folder for files not in the media library.
+     */
+    public static function ajax_sync_scan() {
+        check_ajax_referer( 'uif_nonce', 'nonce' );
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Unauthorized' );
+        }
+
+        @set_time_limit( 300 );
+        wp_raise_memory_limit( 'admin' );
+
+        $result = UIF_Scanner::get_unregistered_files();
+
+        wp_send_json_success( array(
+            'files' => $result['files'],
+            'total' => $result['total'],
+        ) );
+    }
+
+    /**
+     * Import selected files into the WordPress media library.
+     */
+    public static function ajax_sync_import() {
+        check_ajax_referer( 'uif_nonce', 'nonce' );
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Unauthorized' );
+        }
+
+        @set_time_limit( 300 );
+        wp_raise_memory_limit( 'admin' );
+
+        $paths = isset( $_POST['paths'] ) ? (array) $_POST['paths'] : array();
+
+        if ( empty( $paths ) ) {
+            wp_send_json_error( 'No files selected.' );
+        }
+
+        $imported = 0;
+        $errors   = 0;
+
+        foreach ( $paths as $path ) {
+            $path = sanitize_text_field( $path );
+            $result = UIF_Scanner::register_file( $path );
+            if ( is_wp_error( $result ) ) {
+                $errors++;
+            } else {
+                $imported++;
+            }
+        }
+
+        wp_send_json_success( array(
+            'imported' => $imported,
+            'errors'   => $errors,
+            'total'    => count( $paths ),
         ) );
     }
 

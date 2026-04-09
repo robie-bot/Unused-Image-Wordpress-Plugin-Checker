@@ -1027,4 +1027,181 @@
         });
     });
 
+    // ========== Sync Media Library ==========
+
+    var syncData = [];
+    var syncSelectedPaths = {};
+
+    $('#uif-sync-scan-btn').on('click', function () {
+        var btn = $(this);
+        btn.prop('disabled', true);
+        $('#uif-sync-progress').show();
+        $('#uif-sync-results').hide();
+        $('#uif-sync-tbody').empty();
+        syncData = [];
+        syncSelectedPaths = {};
+
+        $.ajax({
+            url: uif.ajax_url,
+            type: 'POST',
+            timeout: 300000,
+            data: { action: 'uif_sync_scan', nonce: uif.nonce }
+        })
+        .done(function (res) {
+            btn.prop('disabled', false);
+            $('#uif-sync-progress').hide();
+            $('#uif-sync-results').show();
+
+            if (!res.success) {
+                showNotice(res.data || 'Sync scan failed.', 'error');
+                return;
+            }
+
+            syncData = res.data.files;
+            $('#uif-sync-count').text(res.data.total);
+
+            if (syncData.length > 0) {
+                $('#uif-sync-table-wrap').show();
+                $('#uif-sync-empty').hide();
+                renderSyncTable();
+            } else {
+                $('#uif-sync-table-wrap').hide();
+                $('#uif-sync-empty').show();
+            }
+        })
+        .fail(function () {
+            btn.prop('disabled', false);
+            $('#uif-sync-progress').hide();
+            showNotice('Sync scan failed. Server may have timed out.', 'error');
+        });
+    });
+
+    function renderSyncTable() {
+        var html = '';
+        for (var i = 0; i < syncData.length; i++) {
+            var f = syncData[i];
+            var safePath = escAttr(f.path);
+            var safeUrl = escAttr(f.url);
+            html += '<tr data-path="' + safePath + '">' +
+                '<td><input type="checkbox" class="uif-sync-cb" value="' + safePath + '" /></td>' +
+                '<td><img class="uif-thumb" src="' + safeUrl + '" alt="" loading="lazy" onerror="this.style.display=\'none\'" /></td>' +
+                '<td><span class="uif-filename">' + $('<span>').text(f.path).html() + '</span></td>' +
+                '<td>' + formatSize(f.filesize) + '</td>' +
+                '</tr>';
+        }
+        $('#uif-sync-tbody').html(html);
+    }
+
+    // Select all sync checkboxes.
+    $(document).on('change', '#uif-sync-select-all, #uif-sync-select-all-top', function () {
+        var checked = $(this).prop('checked');
+        $('#uif-sync-select-all, #uif-sync-select-all-top').prop('checked', checked);
+        $('#uif-sync-tbody .uif-sync-cb').prop('checked', checked);
+        syncSelectedPaths = {};
+        if (checked) {
+            for (var i = 0; i < syncData.length; i++) {
+                syncSelectedPaths[syncData[i].path] = true;
+            }
+        }
+        updateSyncSelectedUI();
+    });
+
+    $(document).on('change', '.uif-sync-cb', function () {
+        var path = $(this).val();
+        if ($(this).prop('checked')) {
+            syncSelectedPaths[path] = true;
+        } else {
+            delete syncSelectedPaths[path];
+        }
+        updateSyncSelectedUI();
+    });
+
+    function syncSelectedCount() {
+        var count = 0;
+        for (var k in syncSelectedPaths) {
+            if (syncSelectedPaths.hasOwnProperty(k) && syncSelectedPaths[k]) count++;
+        }
+        return count;
+    }
+
+    function updateSyncSelectedUI() {
+        var count = syncSelectedCount();
+        $('#uif-sync-selected-count').text(count > 0 ? count + ' selected' : '');
+        $('#uif-sync-import-btn').prop('disabled', count === 0);
+    }
+
+    // Import selected files.
+    $('#uif-sync-import-btn').on('click', function () {
+        var paths = [];
+        for (var k in syncSelectedPaths) {
+            if (syncSelectedPaths.hasOwnProperty(k) && syncSelectedPaths[k]) {
+                paths.push(k);
+            }
+        }
+
+        if (paths.length === 0) {
+            showNotice('No files selected.', 'warning');
+            return;
+        }
+
+        if (!confirm('Import ' + paths.length + ' file(s) into the WordPress Media Library?')) {
+            return;
+        }
+
+        var btn = $('#uif-sync-import-btn');
+        btn.prop('disabled', true).text('Importing...');
+
+        // Import in chunks of 10 (generates thumbnails per file).
+        var chunkSize = 10;
+        var totalImported = 0;
+        var totalErrors = 0;
+
+        function importChunk(startIdx) {
+            var chunk = paths.slice(startIdx, startIdx + chunkSize);
+            if (chunk.length === 0) {
+                var msg = totalImported + ' file(s) imported to Media Library.';
+                if (totalErrors > 0) msg += ' ' + totalErrors + ' error(s).';
+                showNotice(msg, totalErrors > 0 ? 'warning' : 'success');
+                // Remove imported from list.
+                var importedSet = {};
+                for (var i = 0; i < paths.length; i++) { importedSet[paths[i]] = true; }
+                syncData = syncData.filter(function (f) { return !importedSet[f.path]; });
+                syncSelectedPaths = {};
+                $('#uif-sync-count').text(syncData.length);
+                if (syncData.length === 0) {
+                    $('#uif-sync-table-wrap').hide();
+                    $('#uif-sync-empty').show();
+                } else {
+                    renderSyncTable();
+                }
+                btn.prop('disabled', false).text('Import Selected to Media Library');
+                updateSyncSelectedUI();
+                return;
+            }
+
+            $.post(uif.ajax_url, {
+                action: 'uif_sync_import',
+                nonce: uif.nonce,
+                paths: chunk
+            })
+            .done(function (res) {
+                if (res.success) {
+                    totalImported += res.data.imported;
+                    totalErrors += res.data.errors;
+                    btn.text('Importing... ' + totalImported + '/' + paths.length);
+                    setTimeout(function () { importChunk(startIdx + chunkSize); }, 500);
+                } else {
+                    showNotice('Error importing files: ' + (res.data || 'Unknown error'), 'error');
+                    btn.prop('disabled', false).text('Import Selected to Media Library');
+                }
+            })
+            .fail(function () {
+                showNotice('Server error while importing files.', 'error');
+                btn.prop('disabled', false).text('Import Selected to Media Library');
+            });
+        }
+
+        importChunk(0);
+    });
+
 })(jQuery);

@@ -1487,6 +1487,139 @@ class UIF_Scanner {
     }
 
     /**
+     * Scan /wp-content/uploads/ for image files not registered in the media library.
+     * Similar to orphan scan but returns data suitable for importing.
+     *
+     * @return array {
+     *     @type array $files  Array of unregistered file info.
+     *     @type int   $total  Total unregistered files found.
+     * }
+     */
+    public static function get_unregistered_files() {
+        $upload_dir = wp_get_upload_dir();
+        $base_dir   = $upload_dir['basedir'];
+        $base_url   = $upload_dir['baseurl'];
+
+        if ( ! is_dir( $base_dir ) ) {
+            return array( 'files' => array(), 'total' => 0 );
+        }
+
+        $image_exts  = array( 'jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'avif', 'bmp', 'ico', 'tiff', 'tif' );
+        $known_files = self::get_all_known_files();
+        $files       = array();
+
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator( $base_dir, RecursiveDirectoryIterator::SKIP_DOTS ),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+
+        foreach ( $iterator as $file ) {
+            if ( ! $file->isFile() ) {
+                continue;
+            }
+
+            $ext = strtolower( pathinfo( $file->getFilename(), PATHINFO_EXTENSION ) );
+            if ( ! in_array( $ext, $image_exts, true ) ) {
+                continue;
+            }
+
+            $full_path = str_replace( '\\', '/', $file->getPathname() );
+            $base_norm = str_replace( '\\', '/', $base_dir );
+            $relative  = ltrim( str_replace( $base_norm, '', $full_path ), '/' );
+
+            if ( isset( $known_files[ $relative ] ) ) {
+                continue;
+            }
+
+            // Skip thumbnails (WP-generated sizes like -300x200).
+            if ( preg_match( '/-\d+x\d+\.\w+$/', $relative ) ) {
+                continue;
+            }
+
+            // Skip common non-media directories.
+            $skip_dirs = array( 'backup', 'backups', 'imagify-backup', 'cache', 'wpcf7_uploads', 'wc-logs', 'elementor/css', 'elementor/thumbs' );
+            $skip = false;
+            foreach ( $skip_dirs as $dir ) {
+                if ( strpos( $relative, $dir ) === 0 ) {
+                    $skip = true;
+                    break;
+                }
+            }
+            if ( $skip ) {
+                continue;
+            }
+
+            $files[] = array(
+                'path'      => $relative,
+                'url'       => $base_url . '/' . $relative,
+                'filename'  => $file->getFilename(),
+                'filesize'  => $file->getSize(),
+                'full_path' => $full_path,
+            );
+        }
+
+        return array(
+            'files' => $files,
+            'total' => count( $files ),
+        );
+    }
+
+    /**
+     * Register a file from /wp-content/uploads/ into the WordPress media library.
+     *
+     * @param string $relative_path Relative path from uploads base (e.g. "2024/08/photo.jpg").
+     * @return int|WP_Error Attachment ID on success, WP_Error on failure.
+     */
+    public static function register_file( $relative_path ) {
+        $upload_dir = wp_get_upload_dir();
+        $base_dir   = str_replace( '\\', '/', $upload_dir['basedir'] );
+        $base_url   = $upload_dir['baseurl'];
+
+        $relative_path = str_replace( '\\', '/', $relative_path );
+        if ( strpos( $relative_path, '..' ) !== false ) {
+            return new \WP_Error( 'invalid_path', 'Invalid path.' );
+        }
+
+        $full_path = $base_dir . '/' . $relative_path;
+        if ( ! file_exists( $full_path ) || ! is_file( $full_path ) ) {
+            return new \WP_Error( 'file_not_found', 'File not found.' );
+        }
+
+        // Safety: must be inside uploads directory.
+        $real = realpath( $full_path );
+        $real_base = realpath( $base_dir );
+        if ( $real === false || $real_base === false || strpos( $real, $real_base ) !== 0 ) {
+            return new \WP_Error( 'outside_uploads', 'File is outside uploads directory.' );
+        }
+
+        $filetype = wp_check_filetype( basename( $full_path ), null );
+        if ( empty( $filetype['type'] ) ) {
+            return new \WP_Error( 'invalid_type', 'Invalid file type.' );
+        }
+
+        $attachment = array(
+            'guid'           => $base_url . '/' . $relative_path,
+            'post_mime_type' => $filetype['type'],
+            'post_title'     => preg_replace( '/\.[^.]+$/', '', basename( $full_path ) ),
+            'post_content'   => '',
+            'post_status'    => 'inherit',
+        );
+
+        $attach_id = wp_insert_attachment( $attachment, $full_path );
+
+        if ( is_wp_error( $attach_id ) ) {
+            return $attach_id;
+        }
+
+        // Generate attachment metadata (thumbnails, sizes, etc.).
+        require_once ABSPATH . 'wp-admin/includes/image.php';
+        $metadata = wp_generate_attachment_metadata( $attach_id, $full_path );
+        wp_update_attachment_metadata( $attach_id, $metadata );
+
+        return $attach_id;
+    }
+
+    /**
      * Scan post_content for image URLs that point to /wp-content/uploads/
      * but the file no longer exists on disk or in the media library.
      *
