@@ -1600,6 +1600,95 @@ class UIF_Scanner {
             }
         }
 
+        // Also scan postmeta for broken attachment ID references.
+        // This catches: featured images (_thumbnail_id), WooCommerce product galleries
+        // (_product_image_gallery), and WooCommerce category thumbnails.
+        $known_ids = array();
+        foreach ( $attachments as $att ) {
+            $known_ids[ (int) $att->ID ] = true;
+        }
+
+        // 1. Broken featured images (_thumbnail_id).
+        $thumb_rows = $wpdb->get_results(
+            "SELECT pm.meta_value AS thumb_id, p.ID, p.post_title, p.post_type
+             FROM {$wpdb->postmeta} pm
+             INNER JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+             WHERE pm.meta_key = '_thumbnail_id'
+             AND pm.meta_value != ''
+             AND pm.meta_value != '0'
+             AND p.post_type NOT IN ('attachment','revision')
+             AND p.post_status IN ('publish','draft','pending','private','future')"
+        );
+
+        foreach ( $thumb_rows as $row ) {
+            $tid = (int) $row->thumb_id;
+            if ( $tid <= 0 || isset( $known_ids[ $tid ] ) ) {
+                continue;
+            }
+            $key = 'thumb_' . $tid;
+            if ( ! isset( $seen_urls[ $key ] ) ) {
+                $seen_urls[ $key ] = count( $broken );
+                $broken[] = array(
+                    'url'      => '',
+                    'path'     => 'Attachment ID: ' . $tid . ' (featured image)',
+                    'filename' => 'Deleted attachment #' . $tid,
+                    'posts'    => array(),
+                );
+            }
+            $idx = $seen_urls[ $key ];
+            $broken[ $idx ]['posts'][] = array(
+                'id'    => (int) $row->ID,
+                'title' => $row->post_title,
+                'type'  => $row->post_type,
+                'edit'  => admin_url( 'post.php?post=' . $row->ID . '&action=edit' ),
+            );
+        }
+
+        // 2. Broken WooCommerce product gallery images (_product_image_gallery).
+        $gallery_rows = $wpdb->get_results(
+            "SELECT pm.meta_value AS gallery_ids, p.ID, p.post_title, p.post_type
+             FROM {$wpdb->postmeta} pm
+             INNER JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+             WHERE pm.meta_key = '_product_image_gallery'
+             AND pm.meta_value != ''
+             AND p.post_status IN ('publish','draft','pending','private','future')"
+        );
+
+        foreach ( $gallery_rows as $row ) {
+            $gal_ids = array_filter( array_map( 'intval', explode( ',', $row->gallery_ids ) ) );
+            foreach ( $gal_ids as $gid ) {
+                if ( $gid <= 0 || isset( $known_ids[ $gid ] ) ) {
+                    continue;
+                }
+                $key = 'gallery_' . $gid;
+                if ( ! isset( $seen_urls[ $key ] ) ) {
+                    $seen_urls[ $key ] = count( $broken );
+                    $broken[] = array(
+                        'url'      => '',
+                        'path'     => 'Attachment ID: ' . $gid . ' (product gallery)',
+                        'filename' => 'Deleted attachment #' . $gid,
+                        'posts'    => array(),
+                    );
+                }
+                $idx = $seen_urls[ $key ];
+                $already = false;
+                foreach ( $broken[ $idx ]['posts'] as $p ) {
+                    if ( $p['id'] === (int) $row->ID ) {
+                        $already = true;
+                        break;
+                    }
+                }
+                if ( ! $already ) {
+                    $broken[ $idx ]['posts'][] = array(
+                        'id'    => (int) $row->ID,
+                        'title' => $row->post_title,
+                        'type'  => $row->post_type,
+                        'edit'  => admin_url( 'post.php?post=' . $row->ID . '&action=edit' ),
+                    );
+                }
+            }
+        }
+
         return array(
             'references' => $broken,
             'total'      => count( $broken ),
